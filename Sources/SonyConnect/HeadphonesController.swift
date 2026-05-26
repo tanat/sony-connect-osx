@@ -26,7 +26,6 @@ final class HeadphonesController {
     private var outgoingSequence: UInt8 = 0
     private var initialized = false
     private var awaitingInitResponse = false
-    private var userInitiatedConnect: Bool = true   // first launch counts as user-initiated
     private var deviceName: String = "headphones"
 
     // Sony MDR V1 opcodes (from JADX decompile of Sony Headphones Connect
@@ -92,7 +91,6 @@ final class HeadphonesController {
     }
 
     func connect() {
-        userInitiatedConnect = true
         bluetooth.connect()
     }
 
@@ -274,24 +272,21 @@ final class HeadphonesController {
             state.ncMode = nil
             state.speakToChatEnabled = nil
             state.statusDescription = "Disconnected"
-            userInitiatedConnect = false
-        case .searching:
+        case .searching, .connecting:
+            // Transient. Don't overwrite the current statusDescription —
+            // it lingers as "Disconnected" until we actually succeed.
+            // This avoids the misleading "Connecting to WH-1000XM4…"
+            // shown while IOBluetooth is timing out an unreachable
+            // device.
             state.isConnected = false
-            if userInitiatedConnect {
-                state.statusDescription = "Searching..."
-            }
-        case .connecting(let name):
-            deviceName = name
-            state.isConnected = false
-            if userInitiatedConnect {
-                state.statusDescription = "Connecting to \(name)..."
+            if case let .connecting(name) = status {
+                deviceName = name
             }
         case .connected(let name):
             resetSessionState()
             deviceName = name
             state.isConnected = false
             state.statusDescription = "Initializing \(name)..."
-            userInitiatedConnect = false
             sendInit()
         case .failed:
             resetSessionState()
@@ -301,7 +296,6 @@ final class HeadphonesController {
             state.ncMode = nil
             state.speakToChatEnabled = nil
             state.statusDescription = "Disconnected"
-            userInitiatedConnect = false
         }
     }
 
