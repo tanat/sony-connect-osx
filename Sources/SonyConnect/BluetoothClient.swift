@@ -27,17 +27,29 @@ final class BluetoothClient: NSObject {
 
     private var channel: IOBluetoothRFCOMMChannel?
     private var device: IOBluetoothDevice?
+    private var reconnectTimer: Timer?
+    private static let reconnectInterval: TimeInterval = 5
     private(set) var status: Status = .disconnected {
         didSet {
             FileLogger.shared.log("bt", "status -> \(status)")
             onStatus?(status)
+            switch status {
+            case .connected:
+                cancelReconnect()
+            case .failed, .disconnected:
+                scheduleReconnect()
+            case .searching, .connecting:
+                break
+            }
         }
     }
 
     private static let deviceNameHints = ["WH-1000XM4", "WH-1000XM5", "WH-1000XM3"]
 
     func connect() {
+        cancelReconnect()
         if case .connected = status { return }
+        if case .connecting = status { return }
         status = .searching
 
         guard let raw = IOBluetoothDevice.pairedDevices() else {
@@ -67,10 +79,37 @@ final class BluetoothClient: NSObject {
     }
 
     func disconnect() {
+        cancelReconnect()
         channel?.close()
         channel = nil
         device = nil
         status = .disconnected
+    }
+
+    private func scheduleReconnect() {
+        guard reconnectTimer == nil else { return }
+        let t = Timer(timeInterval: Self.reconnectInterval, repeats: false) { [weak self] _ in
+            self?.reconnectTimer = nil
+            self?.attemptReconnect()
+        }
+        reconnectTimer = t
+        RunLoop.main.add(t, forMode: .common)
+        FileLogger.shared.log("bt", "reconnect scheduled in \(Int(Self.reconnectInterval))s")
+    }
+
+    private func cancelReconnect() {
+        reconnectTimer?.invalidate()
+        reconnectTimer = nil
+    }
+
+    private func attemptReconnect() {
+        switch status {
+        case .connected, .connecting, .searching:
+            return
+        case .disconnected, .failed:
+            FileLogger.shared.log("bt", "reconnect attempt")
+            connect()
+        }
     }
 
     func send(_ data: Data) {

@@ -91,11 +91,19 @@ final class HeadphonesController {
     }
 
     func connect() {
+        bluetooth.connect()
+    }
+
+    private func resetSessionState() {
         initialized = false
         awaitingInitResponse = false
         outgoingSequence = 0
         parser.reset()
-        bluetooth.connect()
+        touchPanelSlot = nil
+        touchPanelIsListType = false
+        ncSettingType = 0x02
+        asmSettingType = 0x01
+        asmId = 0x00
     }
 
     func toggleTouchSensor() {
@@ -205,12 +213,17 @@ final class HeadphonesController {
         // accept feature SETs. 0x06 ... is INIT_2_REQUEST (Gadgetbridge
         // PayloadTypeV1).
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
-            self?.sendPayload([0x06, 0x14, 0x01, 0x00, 0x00, 0x00, 0x00],
-                              label: "INIT_2_REQUEST")
+            guard let self = self, self.awaitingInitResponse else { return }
+            self.sendPayload([0x06, 0x14, 0x01, 0x00, 0x00, 0x00, 0x00],
+                             label: "INIT_2_REQUEST")
         }
         // Fallback: complete init even if no canonical INIT_REPLY arrives.
+        // The awaitingInitResponse check makes the timeout a no-op if
+        // the session was reset (disconnect/failure) before it fired.
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-            guard let self = self, !self.initialized else { return }
+            guard let self = self,
+                  self.awaitingInitResponse,
+                  !self.initialized else { return }
             FileLogger.shared.log("state", "INIT timeout — completing anyway")
             self.completeInit()
         }
@@ -234,6 +247,12 @@ final class HeadphonesController {
     }
 
     private func sendPayload(_ payload: [UInt8], label: String) {
+        // Suppress sends if the BT layer has dropped — avoids a flood of
+        // "NO CHANNEL" lines after a mid-init disconnect.
+        guard case .connected = bluetooth.status else {
+            FileLogger.shared.log("cmd", "skip \(label): not connected")
+            return
+        }
         let packet = SonyPacket(dataType: .command1,
                                 sequence: outgoingSequence,
                                 payload: payload)
@@ -246,7 +265,7 @@ final class HeadphonesController {
     private func handleStatus(_ status: BluetoothClient.Status) {
         switch status {
         case .disconnected:
-            initialized = false
+            resetSessionState()
             autoOff.disarm()
             state.isConnected = false
             state.touchSensorEnabled = nil
@@ -261,13 +280,18 @@ final class HeadphonesController {
             state.isConnected = false
             state.statusDescription = "Connecting to \(name)..."
         case .connected(let name):
+            resetSessionState()  // start every new session from a clean slate
             deviceName = name
             state.isConnected = false
             state.statusDescription = "Initializing \(name)..."
             sendInit()
         case .failed(let reason):
-            initialized = false
+            resetSessionState()
+            autoOff.disarm()
             state.isConnected = false
+            state.touchSensorEnabled = nil
+            state.ncMode = nil
+            state.speakToChatEnabled = nil
             state.statusDescription = "Error: \(reason)"
         }
     }
@@ -389,13 +413,18 @@ final class HeadphonesController {
     }
 
     private func parseSystem(_ payload: [UInt8]) {
-        // RET / NOTIFY for SystemInquiredType.SMART_TALKING_MODE:
-        // [0]=opcode 0xF7/0xF9, [1]=systemInquiredType, [2]=paramType, [3]=value
+        // SystemInquiredType is at [1]. Payload structure after that
+        // depends on whether this is RET or NTFY:
+        //   RET (0xF7): [SmartTalkingModeSettingType=0x00 ON_OFF] [value]
+        //   NTFY (0xF9): [SmartTalkingModeParameterType=0x01 MODE_ON_OFF] [value]
+        // We accept both — middle byte logged for diagnostics, value at [3].
         guard payload.count >= 4,
-              payload[1] == Opcode.smartTalkingMode,
-              payload[2] == Opcode.smartTalkingParamModeOnOff else { return }
-        let enabled = payload[3] != 0
+              payload[1] == Opcode.smartTalkingMode else { return }
+        let middle = payload[2]
+        let raw = payload[3]
+        let enabled = raw != 0
         state.speakToChatEnabled = enabled
-        FileLogger.shared.log("state", "SpeakToChat = \(enabled ? "ON" : "OFF")")
+        FileLogger.shared.log("state",
+            "SpeakToChat = \(enabled ? "ON" : "OFF") (mid=\(String(format: "0x%02X", middle)))")
     }
 }
