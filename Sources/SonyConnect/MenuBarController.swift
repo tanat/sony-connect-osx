@@ -12,6 +12,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let ncAmbientItem = NSMenuItem(title: "Ambient Sound", action: nil, keyEquivalent: "")
     private let ncOffItem = NSMenuItem(title: "Off", action: nil, keyEquivalent: "")
     private let speakToChatMenuItem = NSMenuItem(title: "Speak-to-Chat: —", action: nil, keyEquivalent: "")
+    private let autoOffMenuItem = NSMenuItem(title: "Power Off after 30 min idle", action: nil, keyEquivalent: "")
+    private let powerOffMenuItem = NSMenuItem(title: "Power Off Headphones", action: nil, keyEquivalent: "")
     private let reconnectMenuItem = NSMenuItem(title: "Reconnect", action: nil, keyEquivalent: "r")
     private let openLogMenuItem = NSMenuItem(title: "Open Log…", action: nil, keyEquivalent: "")
 
@@ -78,6 +80,16 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
         popupMenu.addItem(.separator())
 
+        autoOffMenuItem.target = self
+        autoOffMenuItem.action = #selector(toggleAutoOff)
+        popupMenu.addItem(autoOffMenuItem)
+
+        powerOffMenuItem.target = self
+        powerOffMenuItem.action = #selector(powerOff)
+        popupMenu.addItem(powerOffMenuItem)
+
+        popupMenu.addItem(.separator())
+
         reconnectMenuItem.target = self
         reconnectMenuItem.action = #selector(reconnect)
         popupMenu.addItem(reconnectMenuItem)
@@ -116,6 +128,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     private func render(state: HeadphonesController.State) {
         statusMenuItem.title = state.statusDescription
+        autoOffMenuItem.state = state.autoOffEnabled ? .on : .off
         if !state.isConnected {
             touchMenuItem.title = "Touch Sensor: —"
             touchMenuItem.state = .off
@@ -125,8 +138,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             speakToChatMenuItem.title = "Speak-to-Chat: —"
             speakToChatMenuItem.state = .off
             speakToChatMenuItem.isEnabled = false
+            powerOffMenuItem.isEnabled = false
             return
         }
+        powerOffMenuItem.isEnabled = true
 
         // Touch sensor row
         switch state.touchSensorEnabled {
@@ -191,6 +206,14 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     @objc private func toggleSpeakToChat() {
         controller.toggleSpeakToChat()
+    }
+
+    @objc private func toggleAutoOff() {
+        controller.autoOffEnabled.toggle()
+    }
+
+    @objc private func powerOff() {
+        controller.powerOff()
     }
 
     @objc private func reconnect() {

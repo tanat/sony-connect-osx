@@ -1,6 +1,6 @@
 # SonyConnect MacOS
 
-A macOS menu-bar app that controls Sony WH-1000XM4 headphones over Bluetooth — toggle the touch panel, switch between Noise Cancelling / Ambient Sound / Off, and turn Speak-to-Chat on or off, all from the menu bar.
+A macOS menu-bar app that controls Sony WH-1000XM4 headphones over Bluetooth — toggle the touch panel, switch between Noise Cancelling / Ambient Sound / Off, turn Speak-to-Chat on or off, and power the headphones off on demand or automatically after an idle window, all from the menu bar.
 
 <img width="256" height="246" alt="image" src="https://github.com/user-attachments/assets/627e3f9e-df2d-478d-b8f2-be82b857465f" />
 
@@ -12,9 +12,11 @@ A macOS menu-bar app that controls Sony WH-1000XM4 headphones over Bluetooth —
   - **Touch Sensor** (enable / disable the right-earcup swipe panel)
   - **Noise Cancelling** — On / Ambient Sound / Off
   - **Speak-to-Chat** — On / Off
+  - **Power Off Headphones** on demand, or automatically after 30 min with no audio playing
   - Connection status, reconnect, log access
 - Picks up state changes coming from the headphones themselves (e.g. pressing the physical NC button) via Sony's NOTIFY packets
 - Auto-discovers the firmware-specific "general settings" slot that holds the touch panel control — works across firmware revisions that hard-coded reverse-engineering does not
+- Idle detection uses CoreAudio's `kAudioDevicePropertyDeviceIsRunningSomewhere` on the headphones' audio device — accurate, no polling of media keys or fragile private APIs
 
 ## Supported headphones
 
@@ -50,6 +52,8 @@ After launch a headphones icon appears in the menu bar. Click it (left or right)
 - **Touch Sensor: ON / OFF** — click to toggle
 - **Noise Cancelling ▸** — submenu with three radio-style options (NC, Ambient, Off)
 - **Speak-to-Chat: ON / OFF** — click to toggle
+- **Power Off after 30 min idle** — checkbox; when on, the app sends the power-off command if no audio plays on the headphones' audio device for 30 minutes. Setting is persisted in `UserDefaults` and survives relaunch.
+- **Power Off Headphones** — sends the power-off command immediately. The headphones shut down and Bluetooth disconnects.
 - **Reconnect** — re-runs the discovery sequence (useful after the headphones suspend or get re-paired)
 - **Open Log…** — reveals `~/Library/Logs/SonyConnect.log` in Finder
 
@@ -80,6 +84,7 @@ SET commands:
 | Ambient Sound       | `68 02 11 <ncType> 00 <asmType> 00 14` (asmLevel=20)                      |
 | NC Off              | `68 02 00 <ncType> 00 <asmType> 00 00`                                    |
 | Speak-to-Chat       | `F8 05 01 <0\|1>`                                                          |
+| Power Off           | `22 00 01` (`COMMON_SET_POWER_OFF` + `USER_POWER_OFF`)                    |
 
 `ncType` and `asmType` come from the device's GET response — different firmware uses different setting-type bytes (`LEVEL_ADJUSTMENT = 0x01` vs `DUAL_SINGLE_OFF = 0x02`), so they're read live rather than hardcoded.
 
@@ -93,6 +98,7 @@ Sources/SonyConnect/
   HeadphonesController.swift — Protocol state machine
   BluetoothClient.swift    — IOBluetooth RFCOMM wrapper, SDP query
   SonyPacket.swift         — Sony frame encoding / decoding (markers, escape, checksum)
+  AutoPowerOff.swift       — CoreAudio idle detection + power-off timer
   FileLogger.swift         — Plain-text log to ~/Library/Logs/SonyConnect.log
 Resources/Info.plist       — LSUIElement + NSBluetoothAlwaysUsageDescription
 Makefile                   — build, app, run, clean
@@ -103,7 +109,7 @@ Package.swift              — Swift Package Manager manifest
 
 - Ad-hoc codesigned only — not notarized, not signed for distribution. Re-sign before sharing the `.app` with anyone else.
 - Connects to the first matching paired device. Multi-device routing not implemented.
-- Only the three features above are wired up. EQ, multipoint, auto-power-off, voice guidance, wear-detection, etc. are protocol-supported but unimplemented.
+- Only the features above are wired up. EQ, multipoint, firmware auto-power-off duration, voice guidance, wear-detection, etc. are protocol-supported but unimplemented.
 - The Sony protocol is reverse-engineered — a firmware update can change opcodes. If the touch toggle stops doing anything physical, check `~/Library/Logs/SonyConnect.log` for the device's capability response and adapt.
 
 ## Credits

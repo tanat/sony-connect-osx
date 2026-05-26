@@ -10,6 +10,7 @@ final class HeadphonesController {
         var touchSensorEnabled: Bool? = nil
         var ncMode: NCMode? = nil
         var speakToChatEnabled: Bool? = nil
+        var autoOffEnabled: Bool = false
         var statusDescription: String = "Disconnected"
     }
 
@@ -21,6 +22,7 @@ final class HeadphonesController {
 
     private let bluetooth = BluetoothClient()
     private let parser = SonyFrameParser()
+    private let autoOff = AutoPowerOff()
     private var outgoingSequence: UInt8 = 0
     private var initialized = false
     private var awaitingInitResponse = false
@@ -35,6 +37,9 @@ final class HeadphonesController {
     private enum Opcode {
         static let initRequest: UInt8 = 0x00
         static let initReply: UInt8 = 0x01
+        static let commonSetPowerOff: UInt8 = 0x22
+        static let powerOffFixedValue: UInt8 = 0x00
+        static let powerOffUserOff: UInt8 = 0x01
         static let ncasmGet: UInt8 = 0x66
         static let ncasmRet: UInt8 = 0x67
         static let ncasmSet: UInt8 = 0x68
@@ -67,6 +72,22 @@ final class HeadphonesController {
     init() {
         bluetooth.onStatus = { [weak self] s in self?.handleStatus(s) }
         bluetooth.onData = { [weak self] data in self?.handleIncoming(data) }
+        autoOff.onShouldPowerOff = { [weak self] in self?.sendPowerOff() }
+        autoOff.onEnabledChanged = { [weak self] _ in
+            guard let self = self else { return }
+            self.state.autoOffEnabled = self.autoOff.isEnabled
+        }
+        state.autoOffEnabled = autoOff.isEnabled
+    }
+
+    var autoOffEnabled: Bool {
+        get { autoOff.isEnabled }
+        set { autoOff.isEnabled = newValue }
+    }
+
+    func powerOff() {
+        guard initialized else { return }
+        sendPowerOff()
     }
 
     func connect() {
@@ -159,6 +180,13 @@ final class HeadphonesController {
                     label: "SpeakToChat SET=\(enabled ? "ON" : "OFF")")
     }
 
+    private func sendPowerOff() {
+        sendPayload([Opcode.commonSetPowerOff,
+                     Opcode.powerOffFixedValue,
+                     Opcode.powerOffUserOff],
+                    label: "POWER_OFF")
+    }
+
     private func queryGeneralSettingCapabilities() {
         let slots: [UInt8] = [Opcode.gs1SubId, Opcode.gs2SubId, Opcode.gs3SubId]
         for (i, slot) in slots.enumerated() {
@@ -196,13 +224,13 @@ final class HeadphonesController {
         state.statusDescription = "Connected: \(deviceName)"
         FileLogger.shared.log("state", "INIT complete, discovering features")
         queryGeneralSettingCapabilities()
-        // Query NC and Speak-to-Chat state after caps discovery.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
             self?.sendNcasmGet()
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.7) { [weak self] in
             self?.sendSpeakToChatGet()
         }
+        autoOff.arm(deviceName: deviceName)
     }
 
     private func sendPayload(_ payload: [UInt8], label: String) {
@@ -219,6 +247,7 @@ final class HeadphonesController {
         switch status {
         case .disconnected:
             initialized = false
+            autoOff.disarm()
             state.isConnected = false
             state.touchSensorEnabled = nil
             state.ncMode = nil
