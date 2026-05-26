@@ -26,6 +26,7 @@ final class HeadphonesController {
     private var outgoingSequence: UInt8 = 0
     private var initialized = false
     private var awaitingInitResponse = false
+    private var userInitiatedConnect: Bool = true   // first launch counts as user-initiated
     private var deviceName: String = "headphones"
 
     // Sony MDR V1 opcodes (from JADX decompile of Sony Headphones Connect
@@ -91,6 +92,7 @@ final class HeadphonesController {
     }
 
     func connect() {
+        userInitiatedConnect = true
         bluetooth.connect()
     }
 
@@ -272,27 +274,34 @@ final class HeadphonesController {
             state.ncMode = nil
             state.speakToChatEnabled = nil
             state.statusDescription = "Disconnected"
+            userInitiatedConnect = false
         case .searching:
             state.isConnected = false
-            state.statusDescription = "Searching..."
+            if userInitiatedConnect {
+                state.statusDescription = "Searching..."
+            }
         case .connecting(let name):
             deviceName = name
             state.isConnected = false
-            state.statusDescription = "Connecting to \(name)..."
+            if userInitiatedConnect {
+                state.statusDescription = "Connecting to \(name)..."
+            }
         case .connected(let name):
-            resetSessionState()  // start every new session from a clean slate
+            resetSessionState()
             deviceName = name
             state.isConnected = false
             state.statusDescription = "Initializing \(name)..."
+            userInitiatedConnect = false
             sendInit()
-        case .failed(let reason):
+        case .failed:
             resetSessionState()
             autoOff.disarm()
             state.isConnected = false
             state.touchSensorEnabled = nil
             state.ncMode = nil
             state.speakToChatEnabled = nil
-            state.statusDescription = "Error: \(reason)"
+            state.statusDescription = "Disconnected"
+            userInitiatedConnect = false
         }
     }
 
