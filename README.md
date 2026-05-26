@@ -2,7 +2,8 @@
 
 A macOS menu-bar app that controls Sony WH-1000XM4 headphones over Bluetooth — toggle the touch panel, switch between Noise Cancelling / Ambient Sound / Off, turn Speak-to-Chat on or off, and power the headphones off on demand or automatically after an idle window, all from the menu bar.
 
-<img width="256" height="246" alt="image" src="https://github.com/user-attachments/assets/627e3f9e-df2d-478d-b8f2-be82b857465f" />
+<img width="265" height="305" alt="image" src="https://github.com/user-attachments/assets/16ec2f0d-85c1-4ef6-abfa-af35522f731b" />
+
 
 
 ## Features
