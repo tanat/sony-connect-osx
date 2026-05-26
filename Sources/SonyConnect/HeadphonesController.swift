@@ -1,9 +1,15 @@
 import Foundation
 
 final class HeadphonesController {
+    enum NCMode: String {
+        case noiseCancelling, ambient, off
+    }
+
     struct State {
         var isConnected: Bool = false
         var touchSensorEnabled: Bool? = nil
+        var ncMode: NCMode? = nil
+        var speakToChatEnabled: Bool? = nil
         var statusDescription: String = "Disconnected"
     }
 
@@ -29,6 +35,11 @@ final class HeadphonesController {
     private enum Opcode {
         static let initRequest: UInt8 = 0x00
         static let initReply: UInt8 = 0x01
+        static let ncasmGet: UInt8 = 0x66
+        static let ncasmRet: UInt8 = 0x67
+        static let ncasmSet: UInt8 = 0x68
+        static let ncasmNotify: UInt8 = 0x69
+        static let ncasmCombinedInquiredType: UInt8 = 0x02   // NOISE_CANCELLING_AND_AMBIENT_SOUND_MODE
         static let gsGetCapability: UInt8 = 0xD0
         static let gsRetCapability: UInt8 = 0xD1
         static let touchSensorGet: UInt8 = 0xD6
@@ -38,10 +49,20 @@ final class HeadphonesController {
         static let gs1SubId: UInt8 = 0xD1
         static let gs2SubId: UInt8 = 0xD2
         static let gs3SubId: UInt8 = 0xD3
+        static let systemGet: UInt8 = 0xF6
+        static let systemRet: UInt8 = 0xF7
+        static let systemSet: UInt8 = 0xF8
+        static let systemNotify: UInt8 = 0xF9
+        static let smartTalkingMode: UInt8 = 0x05            // SystemInquiredType.SMART_TALKING_MODE
+        static let smartTalkingParamModeOnOff: UInt8 = 0x01
     }
 
-    private var touchPanelSlot: UInt8?    // discovered from capability response
-    private var touchPanelIsListType: Bool = false  // BOOLEAN_TYPE vs LIST_TYPE
+    private var touchPanelSlot: UInt8?
+    private var touchPanelIsListType: Bool = false
+    private var ncSettingType: UInt8 = 0x02  // device-reported; default DUAL_SINGLE_OFF for WH-1000XM4
+    private var asmSettingType: UInt8 = 0x01 // device-reported; default LEVEL_ADJUSTMENT
+    private var asmId: UInt8 = 0x00          // NORMAL ambient mode
+    private static let maxAsmLevel: UInt8 = 20
 
     init() {
         bluetooth.onStatus = { [weak self] s in self?.handleStatus(s) }
@@ -64,15 +85,28 @@ final class HeadphonesController {
         let next = !(state.touchSensorEnabled ?? false)
         sendTouchSensor(enabled: next)
         state.touchSensorEnabled = next
-        // Verify the actual post-SET state — some firmware versions
-        // silently ignore SET and the only ground-truth is a fresh GET.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
             self?.sendTouchSensorGet()
         }
     }
 
-    func sendRawPayload(_ payload: [UInt8]) {
-        sendPayload(payload, label: "raw")
+    func setNCMode(_ mode: NCMode) {
+        guard initialized else { return }
+        sendNcasmSet(mode: mode)
+        state.ncMode = mode
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            self?.sendNcasmGet()
+        }
+    }
+
+    func toggleSpeakToChat() {
+        guard initialized else { return }
+        let next = !(state.speakToChatEnabled ?? false)
+        sendSpeakToChat(enabled: next)
+        state.speakToChatEnabled = next
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            self?.sendSpeakToChatGet()
+        }
     }
 
     private func sendTouchSensor(enabled: Bool) {
@@ -87,6 +121,42 @@ final class HeadphonesController {
         let slot = touchPanelSlot ?? Opcode.gs1SubId
         sendPayload([Opcode.touchSensorGet, slot],
                     label: "TouchSensor GET slot=\(String(format: "0x%02X", slot))")
+    }
+
+    private func sendNcasmGet() {
+        sendPayload([Opcode.ncasmGet, Opcode.ncasmCombinedInquiredType],
+                    label: "NCASM GET")
+    }
+
+    private func sendNcasmSet(mode: NCMode) {
+        // Payload: 68 02 effect ncType ncValue asmType asmId asmLevel
+        let effect: UInt8 = (mode == .off) ? 0x00 : 0x11   // OFF or ADJUSTMENT_COMPLETION
+        let ncValue: UInt8 = (mode == .noiseCancelling) ? 0x02 : 0x00 // DUAL or OFF
+        let asmLevel: UInt8 = (mode == .ambient) ? Self.maxAsmLevel : 0
+        let payload: [UInt8] = [
+            Opcode.ncasmSet,
+            Opcode.ncasmCombinedInquiredType,
+            effect,
+            ncSettingType,
+            ncValue,
+            asmSettingType,
+            asmId,
+            asmLevel,
+        ]
+        sendPayload(payload, label: "NCASM SET=\(mode.rawValue)")
+    }
+
+    private func sendSpeakToChatGet() {
+        sendPayload([Opcode.systemGet, Opcode.smartTalkingMode],
+                    label: "SpeakToChat GET")
+    }
+
+    private func sendSpeakToChat(enabled: Bool) {
+        sendPayload([Opcode.systemSet,
+                     Opcode.smartTalkingMode,
+                     Opcode.smartTalkingParamModeOnOff,
+                     enabled ? 0x01 : 0x00],
+                    label: "SpeakToChat SET=\(enabled ? "ON" : "OFF")")
     }
 
     private func queryGeneralSettingCapabilities() {
@@ -124,8 +194,15 @@ final class HeadphonesController {
         awaitingInitResponse = false
         state.isConnected = true
         state.statusDescription = "Connected: \(deviceName)"
-        FileLogger.shared.log("state", "INIT complete, discovering general-setting slots")
+        FileLogger.shared.log("state", "INIT complete, discovering features")
         queryGeneralSettingCapabilities()
+        // Query NC and Speak-to-Chat state after caps discovery.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            self?.sendNcasmGet()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.7) { [weak self] in
+            self?.sendSpeakToChatGet()
+        }
     }
 
     private func sendPayload(_ payload: [UInt8], label: String) {
@@ -144,6 +221,8 @@ final class HeadphonesController {
             initialized = false
             state.isConnected = false
             state.touchSensorEnabled = nil
+            state.ncMode = nil
+            state.speakToChatEnabled = nil
             state.statusDescription = "Disconnected"
         case .searching:
             state.isConnected = false
@@ -191,6 +270,10 @@ final class HeadphonesController {
         switch opcode {
         case Opcode.gsRetCapability:
             parseGsCapability(packet.payload)
+        case Opcode.ncasmRet, Opcode.ncasmNotify:
+            parseNcasm(packet.payload)
+        case Opcode.systemRet, Opcode.systemNotify:
+            parseSystem(packet.payload)
         case Opcode.touchSensorRet:
             if packet.payload.count >= 4 {
                 let slot = packet.payload[1]
@@ -248,30 +331,42 @@ final class HeadphonesController {
         }
     }
 
-    func probeFeatures() {
-        let getCommands: [UInt8] = [
-            0x11, 0x13, 0x21, 0x39, 0x51, 0x71, 0x81,
-            0xA1, 0xC1, 0xD1, 0xE1, 0xF3, 0xF5,
-        ]
-        let subIds: [UInt8] = [0x00, 0x01, 0x02, 0x05, 0x80]
-        var probes: [[UInt8]] = []
-        for cmd in getCommands {
-            for sub in subIds {
-                probes.append([cmd, sub])
-            }
+    private func parseNcasm(_ payload: [UInt8]) {
+        // RET / NOTIFY format for inquiredType=0x02 NOISE_CANCELLING_AND_AMBIENT_SOUND_MODE:
+        // [0]=opcode 0x67/0x69, [1]=inquiredType, [2]=effect, [3]=ncSettingType,
+        // [4]=ncValue/dualSingle, [5]=asmSettingType, [6]=asmId, [7]=asmLevel
+        guard payload.count >= 8,
+              payload[1] == Opcode.ncasmCombinedInquiredType else { return }
+        let effect = payload[2]
+        ncSettingType = payload[3]
+        let ncValue = payload[4]
+        asmSettingType = payload[5]
+        asmId = payload[6]
+        let asmLevel = payload[7]
+
+        let mode: NCMode
+        if effect == 0x00 {
+            mode = .off
+        } else if ncValue != 0x00 {
+            mode = .noiseCancelling
+        } else if asmLevel > 0 {
+            mode = .ambient
+        } else {
+            mode = .off
         }
-        FileLogger.shared.log("probe", "=== starting sweep (\(probes.count) probes) ===")
-        for (i, payload) in probes.enumerated() {
-            let delay = Double(i) * 0.3
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                let hex = payload.map { String(format: "%02X", $0) }.joined(separator: " ")
-                FileLogger.shared.log("probe", ">>> [\(hex)]")
-                self?.sendRawPayload(payload)
-            }
-        }
-        let endDelay = Double(probes.count) * 0.3 + 1.0
-        DispatchQueue.main.asyncAfter(deadline: .now() + endDelay) {
-            FileLogger.shared.log("probe", "=== sweep complete ===")
-        }
+        state.ncMode = mode
+        FileLogger.shared.log("state",
+            "NCASM = \(mode.rawValue) (effect=\(String(format: "0x%02X", effect)) ncT=\(ncSettingType) ncV=\(ncValue) asmT=\(asmSettingType) asmL=\(asmLevel))")
+    }
+
+    private func parseSystem(_ payload: [UInt8]) {
+        // RET / NOTIFY for SystemInquiredType.SMART_TALKING_MODE:
+        // [0]=opcode 0xF7/0xF9, [1]=systemInquiredType, [2]=paramType, [3]=value
+        guard payload.count >= 4,
+              payload[1] == Opcode.smartTalkingMode,
+              payload[2] == Opcode.smartTalkingParamModeOnOff else { return }
+        let enabled = payload[3] != 0
+        state.speakToChatEnabled = enabled
+        FileLogger.shared.log("state", "SpeakToChat = \(enabled ? "ON" : "OFF")")
     }
 }
