@@ -14,6 +14,7 @@ A macOS menu-bar app that controls Sony WH-1000XM4 headphones over Bluetooth —
   - **Noise Cancelling** — On / Ambient Sound / Off
   - **Speak-to-Chat** — On / Off
   - **Power Off Headphones** on demand, or automatically after 30 min with no audio playing
+  - Currently playing media is paused before sending the power-off command, so audio doesn't briefly blast through the internal speakers when A2DP drops
   - Connection status, reconnect, log access
 - Picks up state changes coming from the headphones themselves (e.g. pressing the physical NC button) via Sony's NOTIFY packets
 - Auto-discovers the firmware-specific "general settings" slot that holds the touch panel control — works across firmware revisions that hard-coded reverse-engineering does not
@@ -100,6 +101,7 @@ Sources/SonyConnect/
   BluetoothClient.swift    — IOBluetooth RFCOMM wrapper, SDP query
   SonyPacket.swift         — Sony frame encoding / decoding (markers, escape, checksum)
   AutoPowerOff.swift       — CoreAudio idle detection + power-off timer
+  MediaController.swift    — Pauses Now-Playing media via MediaRemote.framework
   FileLogger.swift         — Plain-text log to ~/Library/Logs/SonyConnect.log
 Resources/Info.plist       — LSUIElement + NSBluetoothAlwaysUsageDescription
 Makefile                   — build, app, run, clean

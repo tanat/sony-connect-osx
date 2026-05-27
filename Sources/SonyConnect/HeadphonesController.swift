@@ -23,6 +23,7 @@ final class HeadphonesController {
     private let bluetooth = BluetoothClient()
     private let parser = SonyFrameParser()
     private let autoOff = AutoPowerOff()
+    private let media = MediaController()
     private var outgoingSequence: UInt8 = 0
     private var initialized = false
     private var awaitingInitResponse = false
@@ -189,6 +190,9 @@ final class HeadphonesController {
     }
 
     private func sendPowerOff() {
+        // Pause first so audio doesn't briefly blast through the laptop
+        // speakers when A2DP drops as the headphones power down.
+        media.pause()
         sendPayload([Opcode.commonSetPowerOff,
                      Opcode.powerOffFixedValue,
                      Opcode.powerOffUserOff],
