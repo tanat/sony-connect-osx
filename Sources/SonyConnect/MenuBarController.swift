@@ -6,6 +6,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let popupMenu = NSMenu()
 
     private let statusMenuItem = NSMenuItem(title: "Disconnected", action: nil, keyEquivalent: "")
+    private let batteryMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let touchMenuItem = NSMenuItem(title: "Touch Sensor: —", action: nil, keyEquivalent: "")
     private let ncParentMenuItem = NSMenuItem(title: "Noise Cancelling: —", action: nil, keyEquivalent: "")
     private let ncOnItem = NSMenuItem(title: "Noise Cancelling", action: nil, keyEquivalent: "")
@@ -57,6 +58,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
         statusMenuItem.isEnabled = false
         popupMenu.addItem(statusMenuItem)
+
+        batteryMenuItem.isEnabled = false
+        batteryMenuItem.isHidden = true
+        popupMenu.addItem(batteryMenuItem)
+
         popupMenu.addItem(.separator())
 
         touchMenuItem.target = self
@@ -129,6 +135,15 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private func render(state: HeadphonesController.State) {
         statusMenuItem.title = state.statusDescription
         autoOffMenuItem.state = state.autoOffEnabled ? .on : .off
+
+        if let level = state.batteryLevel {
+            let suffix = state.batteryCharging ? " (charging)" : ""
+            batteryMenuItem.title = "Battery: \(level)%\(suffix)"
+            batteryMenuItem.isHidden = false
+        } else {
+            batteryMenuItem.isHidden = true
+        }
+
         if !state.isConnected {
             touchMenuItem.title = "Touch Sensor: —"
             touchMenuItem.state = .off

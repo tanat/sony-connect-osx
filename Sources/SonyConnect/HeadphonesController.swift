@@ -10,6 +10,8 @@ final class HeadphonesController {
         var touchSensorEnabled: Bool? = nil
         var ncMode: NCMode? = nil
         var speakToChatEnabled: Bool? = nil
+        var batteryLevel: Int? = nil
+        var batteryCharging: Bool = false
         var autoOffEnabled: Bool = false
         var statusDescription: String = "Disconnected"
     }
@@ -38,6 +40,10 @@ final class HeadphonesController {
     private enum Opcode {
         static let initRequest: UInt8 = 0x00
         static let initReply: UInt8 = 0x01
+        static let batteryGet: UInt8 = 0x10
+        static let batteryRet: UInt8 = 0x11
+        static let batteryNotify: UInt8 = 0x13
+        static let batterySingleInquiredType: UInt8 = 0x00   // BatteryInquiredType.BATTERY
         static let commonSetPowerOff: UInt8 = 0x22
         static let powerOffFixedValue: UInt8 = 0x00
         static let powerOffUserOff: UInt8 = 0x01
@@ -247,7 +253,15 @@ final class HeadphonesController {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.7) { [weak self] in
             self?.sendSpeakToChatGet()
         }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.9) { [weak self] in
+            self?.sendBatteryGet()
+        }
         autoOff.arm(deviceName: deviceName)
+    }
+
+    private func sendBatteryGet() {
+        sendPayload([Opcode.batteryGet, Opcode.batterySingleInquiredType],
+                    label: "BATTERY GET")
     }
 
     private func sendPayload(_ payload: [UInt8], label: String) {
@@ -275,6 +289,8 @@ final class HeadphonesController {
             state.touchSensorEnabled = nil
             state.ncMode = nil
             state.speakToChatEnabled = nil
+            state.batteryLevel = nil
+            state.batteryCharging = false
             state.statusDescription = "Disconnected"
         case .searching, .connecting:
             // Transient. Don't overwrite the current statusDescription —
@@ -299,6 +315,8 @@ final class HeadphonesController {
             state.touchSensorEnabled = nil
             state.ncMode = nil
             state.speakToChatEnabled = nil
+            state.batteryLevel = nil
+            state.batteryCharging = false
             state.statusDescription = "Disconnected"
         }
     }
@@ -330,6 +348,8 @@ final class HeadphonesController {
         switch opcode {
         case Opcode.gsRetCapability:
             parseGsCapability(packet.payload)
+        case Opcode.batteryRet, Opcode.batteryNotify:
+            parseBattery(packet.payload)
         case Opcode.ncasmRet, Opcode.ncasmNotify:
             parseNcasm(packet.payload)
         case Opcode.systemRet, Opcode.systemNotify:
@@ -417,6 +437,19 @@ final class HeadphonesController {
         state.ncMode = mode
         FileLogger.shared.log("state",
             "NCASM = \(mode.rawValue) (effect=\(String(format: "0x%02X", effect)) ncT=\(ncSettingType) ncV=\(ncValue) asmT=\(asmSettingType) asmL=\(asmLevel))")
+    }
+
+    private func parseBattery(_ payload: [UInt8]) {
+        // RET / NOTIFY for single-battery devices:
+        // [0]=opcode 0x11/0x13, [1]=BatteryInquiredType (0=BATTERY),
+        // [2]=level (0..100), [3]=charging status (0 no, 1 yes, F0 unknown)
+        guard payload.count >= 4,
+              payload[1] == Opcode.batterySingleInquiredType else { return }
+        let level = Int(payload[2])
+        let charging = payload[3] == 0x01
+        state.batteryLevel = level
+        state.batteryCharging = charging
+        FileLogger.shared.log("state", "Battery = \(level)% charging=\(charging)")
     }
 
     private func parseSystem(_ payload: [UInt8]) {
