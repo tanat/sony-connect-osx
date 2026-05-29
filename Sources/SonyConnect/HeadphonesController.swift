@@ -64,6 +64,7 @@ final class HeadphonesController {
         static let eqNotifyParam: UInt8 = 0x59
         static let eqPresetInquiredType: UInt8 = 0x01        // EqEbbInquiredType.PRESET_EQ
         static let eqPresetCustom: UInt8 = 0xA0              // EqPresetId.CUSTOM
+        static let eqPresetUnspecified: UInt8 = 0xFF         // EqPresetId.UNSPECIFIED
         static let powerOffFixedValue: UInt8 = 0x00
         static let powerOffUserOff: UInt8 = 0x01
         static let ncasmGet: UInt8 = 0x66
@@ -207,8 +208,12 @@ final class HeadphonesController {
 
     func setEqBands(_ bands: [Int]) {
         guard initialized, !bands.isEmpty else { return }
+        // Custom band values must be sent under preset id UNSPECIFIED (0xFF),
+        // not CUSTOM (0xA0). 0xA0 is a volatile preview the device drops on
+        // the next SPP session; 0xFF makes it persist (this is what the Sony
+        // app does — see nf/c.java j(EqPresetId, int[])).
         var payload: [UInt8] = [Opcode.eqSetParam, Opcode.eqPresetInquiredType,
-                                Opcode.eqPresetCustom, UInt8(bands.count)]
+                                Opcode.eqPresetUnspecified, UInt8(bands.count)]
         payload.append(contentsOf: bands.map { UInt8(clamping: $0) })
         sendPayload(payload, label: "EQ SET custom bands=\(bands)")
         state.eqCurrentPresetId = Opcode.eqPresetCustom
