@@ -6,7 +6,8 @@ final class HeadphonesController {
     }
 
     struct State {
-        var isConnected: Bool = false
+        var isConnected: Bool = false       // SPP control channel is open
+        var deviceReachable: Bool = false   // headphones present at the BT (ACL) level
         var touchSensorEnabled: Bool? = nil
         var ncMode: NCMode? = nil
         var speakToChatEnabled: Bool? = nil
@@ -26,6 +27,8 @@ final class HeadphonesController {
     private let parser = SonyFrameParser()
     private let autoOff = AutoPowerOff()
     private let media = MediaController()
+    private let audioMonitor = AudioActivityMonitor(nameHints: SupportedDevices.nameHints)
+    private let policy: ConnectionPolicy
     private var outgoingSequence: UInt8 = 0
     private var initialized = false
     private var awaitingInitResponse = false
@@ -77,6 +80,7 @@ final class HeadphonesController {
     private static let maxAsmLevel: UInt8 = 20
 
     init() {
+        policy = ConnectionPolicy(audio: audioMonitor)
         bluetooth.onStatus = { [weak self] s in self?.handleStatus(s) }
         bluetooth.onData = { [weak self] data in self?.handleIncoming(data) }
         autoOff.onShouldPowerOff = { [weak self] in self?.sendPowerOff() }
@@ -84,7 +88,28 @@ final class HeadphonesController {
             guard let self = self else { return }
             self.state.autoOffEnabled = self.autoOff.isEnabled
         }
+        policy.onShouldConnect = { [weak self] in self?.bluetooth.connect() }
+        policy.onShouldDisconnect = { [weak self] in
+            FileLogger.shared.log("policy", "disconnecting RFCOMM to save headphones battery")
+            self?.bluetooth.disconnect()
+        }
+        bluetooth.onReachabilityChange = { [weak self] reachable, name in
+            self?.handleReachability(reachable, name: name)
+        }
         state.autoOffEnabled = autoOff.isEnabled
+        bluetooth.startReachabilityMonitoring()
+        policy.start()
+    }
+
+    private func handleReachability(_ reachable: Bool, name: String?) {
+        if let name = name { deviceName = name }
+        state.deviceReachable = reachable
+        // Keep the status line consistent with the icon while the SPP
+        // channel is closed: "(idle)" when the device is still around,
+        // "Disconnected" when it's gone.
+        if !state.isConnected {
+            state.statusDescription = reachable ? "\(deviceName) (idle)" : "Disconnected"
+        }
     }
 
     var autoOffEnabled: Bool {
@@ -98,7 +123,15 @@ final class HeadphonesController {
     }
 
     func connect() {
-        bluetooth.connect()
+        // User clicked Reconnect — counts as user activity.
+        policy.userActivity()
+    }
+
+    // Called when the menu is about to open. The policy treats this as
+    // user activity: connects on demand if currently idle-disconnected
+    // and pushes back the next idle-disconnect.
+    func userActivity() {
+        policy.userActivity()
     }
 
     private func resetSessionState() {
@@ -285,13 +318,16 @@ final class HeadphonesController {
         case .disconnected:
             resetSessionState()
             autoOff.disarm()
+            policy.setCurrentlyConnected(false)
             state.isConnected = false
             state.touchSensorEnabled = nil
             state.ncMode = nil
             state.speakToChatEnabled = nil
             state.batteryLevel = nil
             state.batteryCharging = false
-            state.statusDescription = "Disconnected"
+            // Device may still be present (we just closed SPP for battery
+            // saving) — reflect that instead of a flat "Disconnected".
+            state.statusDescription = state.deviceReachable ? "\(deviceName) (idle)" : "Disconnected"
         case .searching, .connecting:
             // Transient. Don't overwrite the current statusDescription —
             // it lingers as "Disconnected" until we actually succeed.
@@ -305,19 +341,22 @@ final class HeadphonesController {
         case .connected(let name):
             resetSessionState()
             deviceName = name
+            policy.setCurrentlyConnected(true)
             state.isConnected = false
+            state.deviceReachable = true
             state.statusDescription = "Initializing \(name)..."
             sendInit()
         case .failed:
             resetSessionState()
             autoOff.disarm()
+            policy.setCurrentlyConnected(false)
             state.isConnected = false
             state.touchSensorEnabled = nil
             state.ncMode = nil
             state.speakToChatEnabled = nil
             state.batteryLevel = nil
             state.batteryCharging = false
-            state.statusDescription = "Disconnected"
+            state.statusDescription = state.deviceReachable ? "\(deviceName) (idle)" : "Disconnected"
         }
     }
 

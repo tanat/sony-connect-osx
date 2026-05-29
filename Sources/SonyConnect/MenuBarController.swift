@@ -7,6 +7,9 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     private let statusMenuItem = NSMenuItem(title: "Disconnected", action: nil, keyEquivalent: "")
     private let batteryMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let volumeMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let volumeSlider = NSSlider()
+    private let volumeController = VolumeController(nameHints: SupportedDevices.nameHints)
     private let touchMenuItem = NSMenuItem(title: "Touch Sensor: —", action: nil, keyEquivalent: "")
     private let ncParentMenuItem = NSMenuItem(title: "Noise Cancelling: —", action: nil, keyEquivalent: "")
     private let ncOnItem = NSMenuItem(title: "Noise Cancelling", action: nil, keyEquivalent: "")
@@ -27,7 +30,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             DispatchQueue.main.async { self?.render(state: state) }
         }
         render(state: controller.state)
-        controller.connect()
+        // No eager connect — ConnectionPolicy will dial up when audio
+        // starts playing or the user opens the menu.
     }
 
     // MARK: - Icon
@@ -62,6 +66,9 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         batteryMenuItem.isEnabled = false
         batteryMenuItem.isHidden = true
         popupMenu.addItem(batteryMenuItem)
+
+        configureVolumeItem()
+        popupMenu.addItem(volumeMenuItem)
 
         popupMenu.addItem(.separator())
 
@@ -110,6 +117,51 @@ final class MenuBarController: NSObject, NSMenuDelegate {
                                      keyEquivalent: "q"))
     }
 
+    private func configureVolumeItem() {
+        let width: CGFloat = 230
+        let height: CGFloat = 26
+        let leftInset: CGFloat = 38
+        let rightInset: CGFloat = 14
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+        // NSMenu stretches a custom item view to the menu's content width
+        // when its autoresizing mask is flexible-width.
+        container.autoresizingMask = [.width]
+
+        let icon = NSImageView(frame: NSRect(x: 14, y: 5, width: 16, height: 16))
+        icon.image = NSImage(systemSymbolName: "speaker.wave.2.fill",
+                             accessibilityDescription: "Volume")
+        icon.contentTintColor = .secondaryLabelColor
+        icon.autoresizingMask = [.maxXMargin]   // pinned to the left
+        container.addSubview(icon)
+
+        volumeSlider.frame = NSRect(x: leftInset, y: 3,
+                                    width: width - leftInset - rightInset, height: 20)
+        // Fixed left/right margins, flexible width → grows with the menu.
+        volumeSlider.autoresizingMask = [.width]
+        volumeSlider.minValue = 0
+        volumeSlider.maxValue = 1
+        volumeSlider.isContinuous = true
+        volumeSlider.target = self
+        volumeSlider.action = #selector(volumeChanged(_:))
+        container.addSubview(volumeSlider)
+
+        volumeMenuItem.view = container
+        volumeMenuItem.isHidden = true
+    }
+
+    @objc private func volumeChanged(_ sender: NSSlider) {
+        volumeController.setVolume(Float(sender.doubleValue))
+    }
+
+    private func refreshVolumeItem(reachable: Bool) {
+        if reachable, let vol = volumeController.currentVolume() {
+            volumeSlider.floatValue = vol
+            volumeMenuItem.isHidden = false
+        } else {
+            volumeMenuItem.isHidden = true
+        }
+    }
+
     // MARK: - Click routing
 
     @objc private func handleClick(_ sender: Any?) {
@@ -119,6 +171,14 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private func showMenu() {
         statusItem.menu = popupMenu
         statusItem.button?.performClick(nil)
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        // Counts as user activity — wakes the RFCOMM channel if the
+        // policy had idle-disconnected it.
+        controller.userActivity()
+        // Pull the live output volume right before the menu is shown.
+        refreshVolumeItem(reachable: controller.state.deviceReachable)
     }
 
     func menuDidClose(_ menu: NSMenu) {
@@ -136,12 +196,25 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         statusMenuItem.title = state.statusDescription
         autoOffMenuItem.state = state.autoOffEnabled ? .on : .off
 
+        // Dim the menu-bar icon only when the headphones are actually
+        // unreachable (off / out of range). While they're present but our
+        // SPP channel is closed for battery saving ("idle"), the icon
+        // stays normal. appearsDisabled is cosmetic — button stays clickable.
+        statusItem.button?.appearsDisabled = !state.deviceReachable
+
         if let level = state.batteryLevel {
             let suffix = state.batteryCharging ? " (charging)" : ""
             batteryMenuItem.title = "Battery: \(level)%\(suffix)"
             batteryMenuItem.isHidden = false
         } else {
             batteryMenuItem.isHidden = true
+        }
+
+        // Hide the volume slider when the headphones aren't reachable.
+        // (The live value is pulled in menuWillOpen so we don't fight a
+        // user mid-drag with a stray state update.)
+        if !state.deviceReachable {
+            volumeMenuItem.isHidden = true
         }
 
         if !state.isConnected {

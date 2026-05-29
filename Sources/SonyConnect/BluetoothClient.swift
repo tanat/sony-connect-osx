@@ -24,10 +24,17 @@ final class BluetoothClient: NSObject {
 
     var onStatus: ((Status) -> Void)?
     var onData: ((Data) -> Void)?
+    // Fires when the headphones' baseband (ACL) link to the Mac comes or
+    // goes — independent of whether our SPP control channel is open.
+    // Passes (reachable, deviceName?).
+    var onReachabilityChange: ((Bool, String?) -> Void)?
 
     private var channel: IOBluetoothRFCOMMChannel?
     private var device: IOBluetoothDevice?
     private var reconnectTimer: Timer?
+    private var suppressAutoReconnect = false
+    private var connectNotification: IOBluetoothUserNotification?
+    private var disconnectNotification: IOBluetoothUserNotification?
     private static let reconnectInterval: TimeInterval = 5
     private(set) var status: Status = .disconnected {
         didSet {
@@ -36,32 +43,78 @@ final class BluetoothClient: NSObject {
             switch status {
             case .connected:
                 cancelReconnect()
-            case .failed, .disconnected:
+            case .failed:
                 scheduleReconnect()
+            case .disconnected:
+                if !suppressAutoReconnect {
+                    scheduleReconnect()
+                }
             case .searching, .connecting:
                 break
             }
         }
     }
 
-    private static let deviceNameHints = ["WH-1000XM4", "WH-1000XM5", "WH-1000XM3"]
+    // Begin watching the paired headphones' baseband connection so the UI
+    // can reflect "device present" vs. "device off/out of range" even while
+    // our SPP channel is intentionally closed for battery saving.
+    func startReachabilityMonitoring() {
+        connectNotification = IOBluetoothDevice.register(
+            forConnectNotifications: self,
+            selector: #selector(aclDeviceConnected(_:device:))
+        )
+        if let target = targetPairedDevice(), target.isConnected() {
+            registerDisconnect(for: target)
+            onReachabilityChange?(true, target.name)
+        } else {
+            onReachabilityChange?(false, nil)
+        }
+    }
+
+    func isTargetDeviceConnected() -> Bool {
+        targetPairedDevice()?.isConnected() ?? false
+    }
+
+    private func targetPairedDevice() -> IOBluetoothDevice? {
+        guard let raw = IOBluetoothDevice.pairedDevices() else { return nil }
+        let devices = raw.compactMap { $0 as? IOBluetoothDevice }
+        return devices.first { isTargetDevice($0) }
+    }
+
+    private func isTargetDevice(_ device: IOBluetoothDevice) -> Bool {
+        let name = device.name ?? ""
+        return SupportedDevices.nameHints.contains { name.contains($0) }
+    }
+
+    private func registerDisconnect(for device: IOBluetoothDevice) {
+        disconnectNotification?.unregister()
+        disconnectNotification = device.register(
+            forDisconnectNotification: self,
+            selector: #selector(aclDeviceDisconnected(_:device:))
+        )
+    }
+
+    @objc private func aclDeviceConnected(_ notification: IOBluetoothUserNotification, device: IOBluetoothDevice) {
+        guard isTargetDevice(device) else { return }
+        FileLogger.shared.log("bt", "ACL connected: \(device.name ?? "?")")
+        registerDisconnect(for: device)
+        onReachabilityChange?(true, device.name)
+    }
+
+    @objc private func aclDeviceDisconnected(_ notification: IOBluetoothUserNotification, device: IOBluetoothDevice) {
+        guard isTargetDevice(device) else { return }
+        FileLogger.shared.log("bt", "ACL disconnected: \(device.name ?? "?")")
+        onReachabilityChange?(false, device.name)
+    }
 
     func connect() {
+        suppressAutoReconnect = false
         cancelReconnect()
         if case .connected = status { return }
         if case .connecting = status { return }
         status = .searching
 
-        guard let raw = IOBluetoothDevice.pairedDevices() else {
-            status = .failed(reason: "No paired Bluetooth devices found")
-            return
-        }
-        let devices = raw.compactMap { $0 as? IOBluetoothDevice }
-        FileLogger.shared.log("bt", "paired devices: \(devices.map { "\($0.name ?? "?")(\($0.addressString ?? "?"))" }.joined(separator: ", "))")
-        guard let target = devices.first(where: { dev in
-            let name = dev.name ?? ""
-            return Self.deviceNameHints.contains { name.contains($0) }
-        }) else {
+        guard let target = targetPairedDevice() else {
             status = .failed(reason: "Sony WH-1000XM4 not paired")
             return
         }
@@ -79,6 +132,7 @@ final class BluetoothClient: NSObject {
     }
 
     func disconnect() {
+        suppressAutoReconnect = true
         cancelReconnect()
         channel?.close()
         channel = nil
