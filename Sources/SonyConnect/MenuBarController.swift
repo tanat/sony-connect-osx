@@ -12,7 +12,9 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let volumeController = VolumeController(nameHints: SupportedDevices.nameHints)
     private let eqPresetMenuItem = NSMenuItem(title: "Equalizer: —", action: nil, keyEquivalent: "")
     private let eqPresetSubmenu = NSMenu(title: "Equalizer")
-    private var eqSubmenuPresetIds: [UInt8] = []
+    private let eqPresetListItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let eqPresetListView = EqPresetListView()
+    private var eqSubmenuBuilt = false
     private let eqBandsMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let eqView = EqualizerView()
     private let touchMenuItem = NSMenuItem(title: "Touch Sensor: —", action: nil, keyEquivalent: "")
@@ -79,10 +81,13 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         eqPresetMenuItem.isHidden = true
         popupMenu.addItem(eqPresetMenuItem)
 
+        // The preset list and band sliders live inside the Equalizer
+        // submenu (collapsed by default). Both are custom views so a click
+        // doesn't dismiss the menu — presets can be auditioned in place.
+        eqPresetListView.onSelect = { [weak self] id in self?.controller.setEqPreset(id) }
+        eqPresetListItem.view = eqPresetListView
         eqView.onBandsChanged = { [weak self] bands in self?.controller.setEqBands(bands) }
         eqBandsMenuItem.view = eqView
-        eqBandsMenuItem.isHidden = true
-        popupMenu.addItem(eqBandsMenuItem)
 
         popupMenu.addItem(.separator())
 
@@ -233,15 +238,13 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
         // Equalizer (only once the device has reported its preset list)
         if state.isConnected && !state.eqPresets.isEmpty {
-            rebuildEqPresetSubmenu(presets: state.eqPresets, current: state.eqCurrentPresetId)
+            updateEqSubmenu(presets: state.eqPresets, current: state.eqCurrentPresetId)
             let currentName = state.eqPresets.first { $0.id == state.eqCurrentPresetId }?.name ?? "—"
             eqPresetMenuItem.title = "Equalizer: \(currentName)"
             eqPresetMenuItem.isHidden = false
             eqView.setBands(state.eqBands)
-            eqBandsMenuItem.isHidden = false
         } else {
             eqPresetMenuItem.isHidden = true
-            eqBandsMenuItem.isHidden = true
         }
 
         if !state.isConnected {
@@ -323,27 +326,15 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         controller.toggleSpeakToChat()
     }
 
-    private func rebuildEqPresetSubmenu(presets: [HeadphonesController.EqPreset], current: UInt8?) {
-        let ids = presets.map { $0.id }
-        if ids != eqSubmenuPresetIds {
-            eqSubmenuPresetIds = ids
+    private func updateEqSubmenu(presets: [HeadphonesController.EqPreset], current: UInt8?) {
+        if !eqSubmenuBuilt {
+            eqSubmenuBuilt = true
             eqPresetSubmenu.removeAllItems()
-            for preset in presets {
-                let item = NSMenuItem(title: preset.name,
-                                      action: #selector(selectEqPreset(_:)),
-                                      keyEquivalent: "")
-                item.target = self
-                item.tag = Int(preset.id)
-                eqPresetSubmenu.addItem(item)
-            }
+            eqPresetSubmenu.addItem(eqPresetListItem)   // custom preset rows
+            eqPresetSubmenu.addItem(.separator())
+            eqPresetSubmenu.addItem(eqBandsMenuItem)    // custom band sliders
         }
-        for item in eqPresetSubmenu.items {
-            item.state = (UInt8(item.tag) == current) ? .on : .off
-        }
-    }
-
-    @objc private func selectEqPreset(_ sender: NSMenuItem) {
-        controller.setEqPreset(UInt8(sender.tag))
+        eqPresetListView.setPresets(presets, current: current)
     }
 
     @objc private func toggleAutoOff() {

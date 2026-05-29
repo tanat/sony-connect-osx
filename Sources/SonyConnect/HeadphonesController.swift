@@ -574,6 +574,8 @@ final class HeadphonesController {
             presets.append(EqPreset(id: id, name: name))
             i = nameEnd
         }
+        // Drop the USER_SETTING1…5 slots (0xA1–0xA5) — not useful here.
+        presets.removeAll { $0.id >= 0xA1 && $0.id <= 0xA5 }
         // Move the manually-editable "Custom" preset to the very end of
         // the list — it's the one the band sliders write to.
         if let idx = presets.firstIndex(where: { $0.id == Opcode.eqPresetCustom }) {
