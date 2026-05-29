@@ -13,6 +13,8 @@ A macOS menu-bar app that controls Sony WH-1000XM4 headphones over Bluetooth —
   - **Touch Sensor** (enable / disable the right-earcup swipe panel)
   - **Noise Cancelling** — On / Ambient Sound / Off
   - **Speak-to-Chat** — On / Off
+  - **Equalizer** — preset submenu (names pulled live from the device's capability table) plus a 6-band graphic EQ (5 frequency bands + Clear Bass) with sliders
+  - **Volume** — full-width slider over the headphones' output level
   - **Power Off Headphones** on demand, or automatically after 30 min with no audio playing
   - Currently playing media is paused before sending the power-off command, so audio doesn't briefly blast through the internal speakers when A2DP drops
   - Connection status, reconnect, log access
@@ -86,6 +88,8 @@ SET commands:
 | Ambient Sound       | `68 02 11 <ncType> 00 <asmType> 00 14` (asmLevel=20)                      |
 | NC Off              | `68 02 00 <ncType> 00 <asmType> 00 00`                                    |
 | Speak-to-Chat       | `F8 05 01 <0\|1>`                                                          |
+| EQ preset           | `58 01 <presetId> 00` (`EQEBB_SET_PARAM` + `PRESET_EQ`)                   |
+| EQ custom bands      | `58 01 A0 <nBands> <b0…bN>` (preset `CUSTOM`, band values 0…20, 10 = flat)|
 | Power Off           | `22 00 01` (`COMMON_SET_POWER_OFF` + `USER_POWER_OFF`)                    |
 
 `ncType` and `asmType` come from the device's GET response — different firmware uses different setting-type bytes (`LEVEL_ADJUSTMENT = 0x01` vs `DUAL_SINGLE_OFF = 0x02`), so they're read live rather than hardcoded.
@@ -98,10 +102,15 @@ Sources/SonyConnect/
   AppDelegate.swift        — Owns the menu bar controller
   MenuBarController.swift  — NSStatusItem, menu, click routing
   HeadphonesController.swift — Protocol state machine
-  BluetoothClient.swift    — IOBluetooth RFCOMM wrapper, SDP query
+  BluetoothClient.swift    — IOBluetooth RFCOMM wrapper, SDP query, ACL reachability
   SonyPacket.swift         — Sony frame encoding / decoding (markers, escape, checksum)
-  AutoPowerOff.swift       — CoreAudio idle detection + power-off timer
+  ConnectionPolicy.swift   — lazy connect + idle disconnect (battery saving)
+  AudioActivityMonitor.swift — CoreAudio "is the device playing" probe
+  AutoPowerOff.swift       — idle-based power-off timer
   MediaController.swift    — Pauses Now-Playing media via MediaRemote.framework
+  VolumeController.swift   — CoreAudio output-volume get/set
+  EqualizerView.swift      — graphic-EQ band sliders (custom menu-item view)
+  SupportedDevices.swift   — device name hints
   FileLogger.swift         — Plain-text log to ~/Library/Logs/SonyConnect.log
 Resources/Info.plist       — LSUIElement + NSBluetoothAlwaysUsageDescription
 Makefile                   — build, app, run, clean
