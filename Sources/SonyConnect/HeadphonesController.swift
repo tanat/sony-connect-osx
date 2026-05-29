@@ -5,6 +5,11 @@ final class HeadphonesController {
         case noiseCancelling, ambient, off
     }
 
+    struct EqPreset {
+        let id: UInt8
+        let name: String
+    }
+
     struct State {
         var isConnected: Bool = false       // SPP control channel is open
         var deviceReachable: Bool = false   // headphones present at the BT (ACL) level
@@ -13,6 +18,9 @@ final class HeadphonesController {
         var speakToChatEnabled: Bool? = nil
         var batteryLevel: Int? = nil
         var batteryCharging: Bool = false
+        var eqPresets: [EqPreset] = []
+        var eqCurrentPresetId: UInt8? = nil
+        var eqBands: [Int] = []
         var autoOffEnabled: Bool = false
         var statusDescription: String = "Disconnected"
     }
@@ -48,6 +56,14 @@ final class HeadphonesController {
         static let batteryNotify: UInt8 = 0x13
         static let batterySingleInquiredType: UInt8 = 0x00   // BatteryInquiredType.BATTERY
         static let commonSetPowerOff: UInt8 = 0x22
+        static let eqGetCapability: UInt8 = 0x50
+        static let eqRetCapability: UInt8 = 0x51
+        static let eqGetParam: UInt8 = 0x56
+        static let eqRetParam: UInt8 = 0x57
+        static let eqSetParam: UInt8 = 0x58
+        static let eqNotifyParam: UInt8 = 0x59
+        static let eqPresetInquiredType: UInt8 = 0x01        // EqEbbInquiredType.PRESET_EQ
+        static let eqPresetCustom: UInt8 = 0xA0              // EqPresetId.CUSTOM
         static let powerOffFixedValue: UInt8 = 0x00
         static let powerOffUserOff: UInt8 = 0x01
         static let ncasmGet: UInt8 = 0x66
@@ -178,6 +194,27 @@ final class HeadphonesController {
         }
     }
 
+    func setEqPreset(_ id: UInt8) {
+        guard initialized else { return }
+        sendPayload([Opcode.eqSetParam, Opcode.eqPresetInquiredType, id, 0x00],
+                    label: "EQ SET preset=0x\(String(format: "%02X", id))")
+        state.eqCurrentPresetId = id
+        // Pull the resulting band curve for the new preset.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            self?.sendEqGet()
+        }
+    }
+
+    func setEqBands(_ bands: [Int]) {
+        guard initialized, !bands.isEmpty else { return }
+        var payload: [UInt8] = [Opcode.eqSetParam, Opcode.eqPresetInquiredType,
+                                Opcode.eqPresetCustom, UInt8(bands.count)]
+        payload.append(contentsOf: bands.map { UInt8(clamping: $0) })
+        sendPayload(payload, label: "EQ SET custom bands=\(bands)")
+        state.eqCurrentPresetId = Opcode.eqPresetCustom
+        state.eqBands = bands
+    }
+
     private func sendTouchSensor(enabled: Bool) {
         let slot = touchPanelSlot ?? Opcode.gs1SubId  // best guess if not yet discovered
         let settingType: UInt8 = touchPanelIsListType ? 0x02 : 0x01
@@ -289,12 +326,27 @@ final class HeadphonesController {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.9) { [weak self] in
             self?.sendBatteryGet()
         }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.1) { [weak self] in
+            self?.sendEqCapabilityGet()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.3) { [weak self] in
+            self?.sendEqGet()
+        }
         autoOff.arm(deviceName: deviceName)
     }
 
     private func sendBatteryGet() {
         sendPayload([Opcode.batteryGet, Opcode.batterySingleInquiredType],
                     label: "BATTERY GET")
+    }
+
+    private func sendEqCapabilityGet() {
+        sendPayload([Opcode.eqGetCapability, Opcode.eqPresetInquiredType, 0x00],
+                    label: "EQ GET_CAPABILITY")
+    }
+
+    private func sendEqGet() {
+        sendPayload([Opcode.eqGetParam, Opcode.eqPresetInquiredType], label: "EQ GET")
     }
 
     private func sendPayload(_ payload: [UInt8], label: String) {
@@ -325,6 +377,9 @@ final class HeadphonesController {
             state.speakToChatEnabled = nil
             state.batteryLevel = nil
             state.batteryCharging = false
+            state.eqPresets = []
+            state.eqCurrentPresetId = nil
+            state.eqBands = []
             // Device may still be present (we just closed SPP for battery
             // saving) — reflect that instead of a flat "Disconnected".
             state.statusDescription = state.deviceReachable ? "\(deviceName) (idle)" : "Disconnected"
@@ -356,6 +411,9 @@ final class HeadphonesController {
             state.speakToChatEnabled = nil
             state.batteryLevel = nil
             state.batteryCharging = false
+            state.eqPresets = []
+            state.eqCurrentPresetId = nil
+            state.eqBands = []
             state.statusDescription = state.deviceReachable ? "\(deviceName) (idle)" : "Disconnected"
         }
     }
@@ -389,6 +447,10 @@ final class HeadphonesController {
             parseGsCapability(packet.payload)
         case Opcode.batteryRet, Opcode.batteryNotify:
             parseBattery(packet.payload)
+        case Opcode.eqRetCapability:
+            parseEqCapability(packet.payload)
+        case Opcode.eqRetParam, Opcode.eqNotifyParam:
+            parseEqParam(packet.payload)
         case Opcode.ncasmRet, Opcode.ncasmNotify:
             parseNcasm(packet.payload)
         case Opcode.systemRet, Opcode.systemNotify:
@@ -489,6 +551,78 @@ final class HeadphonesController {
         state.batteryLevel = level
         state.batteryCharging = charging
         FileLogger.shared.log("state", "Battery = \(level)% charging=\(charging)")
+    }
+
+    private func parseEqCapability(_ payload: [UInt8]) {
+        // [0]=0x51 [1]=inquiredType [2]=bandCount [3]=levelSteps
+        // [4]=presetCount, then per preset: [presetId][nameLen][name…]
+        guard payload.count >= 5, payload[1] == Opcode.eqPresetInquiredType else { return }
+        let presetCount = Int(payload[4])
+        var presets: [EqPreset] = []
+        var i = 5
+        for _ in 0..<presetCount {
+            guard i + 1 < payload.count else { break }
+            let id = payload[i]
+            let nameLen = Int(payload[i + 1])
+            let nameStart = i + 2
+            let nameEnd = nameStart + nameLen
+            guard nameEnd <= payload.count else { break }
+            let capName = nameLen > 0
+                ? String(bytes: payload[nameStart..<nameEnd], encoding: .utf8)
+                : nil
+            let name = (capName?.isEmpty == false) ? capName! : Self.fallbackPresetName(id)
+            presets.append(EqPreset(id: id, name: name))
+            i = nameEnd
+        }
+        // Move the manually-editable "Custom" preset to the very end of
+        // the list — it's the one the band sliders write to.
+        if let idx = presets.firstIndex(where: { $0.id == Opcode.eqPresetCustom }) {
+            presets.append(presets.remove(at: idx))
+        }
+        state.eqPresets = presets
+        FileLogger.shared.log("state", "EQ presets: \(presets.map { "\($0.name)=0x\(String(format: "%02X", $0.id))" }.joined(separator: ", "))")
+    }
+
+    private func parseEqParam(_ payload: [UInt8]) {
+        // [0]=0x57/0x59 [1]=inquiredType [2]=presetId [3]=nBands [4…]=band values
+        guard payload.count >= 4, payload[1] == Opcode.eqPresetInquiredType else { return }
+        let presetId = payload[2]
+        let nBands = Int(payload[3])
+        var bands: [Int] = []
+        if 4 + nBands <= payload.count {
+            bands = payload[4..<(4 + nBands)].map { Int($0) }
+        }
+        state.eqCurrentPresetId = presetId
+        state.eqBands = bands
+        FileLogger.shared.log("state", "EQ current=0x\(String(format: "%02X", presetId)) bands=\(bands)")
+    }
+
+    static func fallbackPresetName(_ id: UInt8) -> String {
+        switch id {
+        case 0x00: return "Off"
+        case 0x01: return "Rock"
+        case 0x02: return "Pop"
+        case 0x03: return "Jazz"
+        case 0x04: return "Dance"
+        case 0x05: return "EDM"
+        case 0x06: return "R&B / Hip-Hop"
+        case 0x07: return "Acoustic"
+        case 0x10: return "Bright"
+        case 0x11: return "Excited"
+        case 0x12: return "Mellow"
+        case 0x13: return "Relaxed"
+        case 0x14: return "Vocal"
+        case 0x15: return "Treble Boost"
+        case 0x16: return "Bass Boost"
+        case 0x17: return "Speech"
+        case 0xA0: return "Custom"
+        case 0xA1: return "User 1"
+        case 0xA2: return "User 2"
+        case 0xA3: return "User 3"
+        case 0xA4: return "User 4"
+        case 0xA5: return "User 5"
+        default: return String(format: "Preset 0x%02X", id)
+        }
     }
 
     private func parseSystem(_ payload: [UInt8]) {
