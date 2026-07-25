@@ -39,10 +39,10 @@ enum AutoPowerOffOption: Int, CaseIterable {
         }
     }
 
-    // Only the headphones can detect being taken off, and there is no
-    // verified wear-detection command yet, so that entry stays unlisted.
-    static var selectable: [AutoPowerOffOption] {
-        allCases.filter { $0 != .whenTakenOff }
+    // Only the headphones can detect being taken off, and only v2 exposes a
+    // code for it, so v1 omits that entry.
+    static func selectable(isV2: Bool) -> [AutoPowerOffOption] {
+        isV2 ? allCases : allCases.filter { $0 != .whenTakenOff }
     }
 }
 
