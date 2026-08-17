@@ -5,26 +5,77 @@ import Foundation
 // controller to power off the device after a fixed idle threshold.
 // Idle = the AudioDeviceID whose name matches the headphones is not
 // in the "running somewhere" state (no process is feeding it audio).
+// The idle timeouts Sony's own app offers. Raw values match the order the
+// v2 protocol indexes them in, so they double as the wire code lookup.
+enum AutoPowerOffOption: Int, CaseIterable {
+    case off = 0
+    case fiveMinutes = 1
+    case thirtyMinutes = 2
+    case oneHour = 3
+    case threeHours = 4
+    case whenTakenOff = 5
+
+    var title: String {
+        switch self {
+        case .off: return "Off"
+        case .fiveMinutes: return "After 5 min idle"
+        case .thirtyMinutes: return "After 30 min idle"
+        case .oneHour: return "After 1 hour idle"
+        case .threeHours: return "After 3 hours idle"
+        case .whenTakenOff: return "When taken off"
+        }
+    }
+
+    // Idle threshold for the Mac-side timer. Nil means this option can't be
+    // driven from a countdown here — "off" needs none, and "when taken off"
+    // relies on the headphones' own wear detection.
+    var idleSeconds: TimeInterval? {
+        switch self {
+        case .off, .whenTakenOff: return nil
+        case .fiveMinutes: return 5 * 60
+        case .thirtyMinutes: return 30 * 60
+        case .oneHour: return 60 * 60
+        case .threeHours: return 3 * 60 * 60
+        }
+    }
+
+    // Only the headphones can detect being taken off, and there is no
+    // verified wear-detection command yet, so that entry stays unlisted.
+    static var selectable: [AutoPowerOffOption] {
+        allCases.filter { $0 != .whenTakenOff }
+    }
+}
+
 final class AutoPowerOff {
-    static let defaultsKey = "AutoOffEnabled"
-    static let thresholdSeconds: TimeInterval = 30 * 60
+    static let legacyDefaultsKey = "AutoOffEnabled"
+    static let defaultsKey = "AutoOffOption"
     static let pollInterval: TimeInterval = 60
 
     var onShouldPowerOff: (() -> Void)?
-    var onEnabledChanged: ((Bool) -> Void)?
+    var onOptionChanged: ((AutoPowerOffOption) -> Void)?
 
-    var isEnabled: Bool {
-        get { UserDefaults.standard.bool(forKey: Self.defaultsKey) }
+    var option: AutoPowerOffOption {
+        get {
+            let defaults = UserDefaults.standard
+            if let raw = defaults.object(forKey: Self.defaultsKey) as? Int,
+               let stored = AutoPowerOffOption(rawValue: raw) {
+                return stored
+            }
+            // Carry over the old on/off preference, which always meant 30 min.
+            return defaults.bool(forKey: Self.legacyDefaultsKey) ? .thirtyMinutes : .off
+        }
         set {
-            UserDefaults.standard.set(newValue, forKey: Self.defaultsKey)
-            onEnabledChanged?(newValue)
-            if newValue, isArmed {
+            UserDefaults.standard.set(newValue.rawValue, forKey: Self.defaultsKey)
+            onOptionChanged?(newValue)
+            if newValue.idleSeconds != nil, isArmed {
                 start()
             } else {
                 stop()
             }
         }
     }
+
+    var isEnabled: Bool { option != .off }
 
     private var deviceNameMatch: String = ""
     private var isArmed: Bool = false  // headphones connected + ready
@@ -35,7 +86,7 @@ final class AutoPowerOff {
         deviceNameMatch = deviceName
         isArmed = true
         lastActiveDate = Date()
-        if isEnabled {
+        if option.idleSeconds != nil {
             start()
         }
     }
@@ -47,8 +98,9 @@ final class AutoPowerOff {
 
     private func start() {
         stop()
+        guard let threshold = option.idleSeconds else { return }
         lastActiveDate = Date()
-        FileLogger.shared.log("autoOff", "armed; threshold=\(Int(Self.thresholdSeconds))s, poll=\(Int(Self.pollInterval))s")
+        FileLogger.shared.log("autoOff", "armed; threshold=\(Int(threshold))s, poll=\(Int(Self.pollInterval))s")
         let t = Timer(timeInterval: Self.pollInterval, repeats: true) { [weak self] _ in
             self?.tick()
         }
@@ -62,13 +114,13 @@ final class AutoPowerOff {
     }
 
     private func tick() {
-        guard isArmed, isEnabled else { return }
+        guard isArmed, let threshold = option.idleSeconds else { return }
         let running = isAudioActive()
         if running {
             lastActiveDate = Date()
         } else {
             let idle = Date().timeIntervalSince(lastActiveDate)
-            if idle >= Self.thresholdSeconds {
+            if idle >= threshold {
                 FileLogger.shared.log("autoOff", "idle \(Int(idle))s exceeds threshold, requesting power-off")
                 lastActiveDate = Date()  // avoid retriggering before disconnect
                 onShouldPowerOff?()

@@ -28,7 +28,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let ambientLevelSlider = ScrollableSlider()
     private let focusOnVoiceMenuItem = NSMenuItem(title: "Focus on Voice", action: nil, keyEquivalent: "")
     private let speakToChatMenuItem = NSMenuItem(title: "Speak-to-Chat: —", action: nil, keyEquivalent: "")
-    private let autoOffMenuItem = NSMenuItem(title: "Power Off after 30 min idle", action: nil, keyEquivalent: "")
+    private let autoOffMenuItem = NSMenuItem(title: "Auto Power Off", action: nil, keyEquivalent: "")
+    private let autoOffSubmenu = NSMenu(title: "Auto Power Off")
     private let powerOffMenuItem = NSMenuItem(title: "Power Off Headphones", action: nil, keyEquivalent: "")
     private let reconnectMenuItem = NSMenuItem(title: "Reconnect", action: nil, keyEquivalent: "r")
     private let hideIconMenuItem = NSMenuItem(title: "Hide Icon When Disconnected", action: nil, keyEquivalent: "")
@@ -139,8 +140,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
         popupMenu.addItem(.separator())
 
-        autoOffMenuItem.target = self
-        autoOffMenuItem.action = #selector(toggleAutoOff)
+        autoOffMenuItem.submenu = autoOffSubmenu
         popupMenu.addItem(autoOffMenuItem)
 
         powerOffMenuItem.target = self
@@ -299,7 +299,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     private func render(state: HeadphonesController.State) {
         statusMenuItem.title = state.statusDescription
-        autoOffMenuItem.state = state.autoOffEnabled ? .on : .off
+        updateAutoOffSubmenu(state: state)
 
         // Default: the icon stays put and dims while the headphones are
         // unreachable — Quit has to stay clickable since there's no Dock icon.
@@ -442,8 +442,32 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         eqPresetListView.setPresets(presets, current: current)
     }
 
-    @objc private func toggleAutoOff() {
-        controller.autoOffEnabled.toggle()
+    // Rebuilt on demand: "When taken off" only exists on v2, so the option
+    // list depends on the connected device.
+    private func updateAutoOffSubmenu(state: HeadphonesController.State) {
+        let options = AutoPowerOffOption.selectable
+        if autoOffSubmenu.items.count != options.count {
+            autoOffSubmenu.removeAllItems()
+            for option in options {
+                let item = NSMenuItem(title: option.title,
+                                      action: #selector(setAutoOffFromMenu(_:)),
+                                      keyEquivalent: "")
+                item.target = self
+                item.tag = option.rawValue
+                autoOffSubmenu.addItem(item)
+            }
+        }
+        for item in autoOffSubmenu.items {
+            item.state = item.tag == state.autoOffOption.rawValue ? .on : .off
+        }
+        autoOffMenuItem.title = state.autoOffOption == .off
+            ? "Auto Power Off: Off"
+            : "Auto Power Off: \(state.autoOffOption.title)"
+    }
+
+    @objc private func setAutoOffFromMenu(_ sender: NSMenuItem) {
+        guard let option = AutoPowerOffOption(rawValue: sender.tag) else { return }
+        controller.autoOffOption = option
     }
 
     @objc private func powerOff() {

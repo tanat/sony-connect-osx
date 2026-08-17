@@ -21,7 +21,7 @@ final class HeadphonesController {
         var eqPresets: [EqPreset] = []
         var eqCurrentPresetId: UInt8? = nil
         var eqBands: [Int] = []
-        var autoOffEnabled: Bool = false
+        var autoOffOption: AutoPowerOffOption = .off
         var statusDescription: String = "Disconnected"
         var ambientLevel: Int = 20          // 0...20, meaningful only while ncMode == .ambient
         var ambientFocusOnVoice: Bool = false
@@ -104,9 +104,8 @@ final class HeadphonesController {
         bluetooth.onStatus = { [weak self] s in self?.handleStatus(s) }
         bluetooth.onData = { [weak self] data in self?.handleIncoming(data) }
         autoOff.onShouldPowerOff = { [weak self] in self?.sendPowerOff() }
-        autoOff.onEnabledChanged = { [weak self] _ in
-            guard let self = self else { return }
-            self.state.autoOffEnabled = self.autoOff.isEnabled
+        autoOff.onOptionChanged = { [weak self] option in
+            self?.state.autoOffOption = option
         }
         policy.onShouldConnect = { [weak self] in self?.bluetooth.connect() }
         policy.onShouldDisconnect = { [weak self] in
@@ -125,7 +124,7 @@ final class HeadphonesController {
         bluetooth.onReachabilityChange = { [weak self] reachable, name in
             self?.handleReachability(reachable, name: name)
         }
-        state.autoOffEnabled = autoOff.isEnabled
+        state.autoOffOption = autoOff.option
         bluetooth.startReachabilityMonitoring()
         policy.start()
     }
@@ -141,9 +140,9 @@ final class HeadphonesController {
         }
     }
 
-    var autoOffEnabled: Bool {
-        get { autoOff.isEnabled }
-        set { autoOff.isEnabled = newValue }
+    var autoOffOption: AutoPowerOffOption {
+        get { autoOff.option }
+        set { autoOff.option = newValue }
     }
 
     func powerOff() {
