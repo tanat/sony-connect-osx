@@ -11,7 +11,25 @@ private let sonyServiceUUIDBytes: [UInt8] = [
     0xE3, 0x16, 0xF5, 0xE0, 0x69, 0xBA,
 ]
 
+// Second-generation service UUID (WH-CH720N, WH/WF-1000XM5, recent XM4 units).
+// Devices advertise either this or the v1 UUID above — never both — and the
+// payload opcodes differ per generation even though the framing is identical.
+private let sonyServiceUUIDV2Bytes: [UInt8] = [
+    0x95, 0x6C, 0x7B, 0x26,
+    0xD4, 0x9A,
+    0x4B, 0xA8,
+    0xB0, 0x3F,
+    0xB1, 0x7D, 0x39, 0x3C, 0xB6, 0xE2,
+]
+
 private let log = Logger(subsystem: "com.tanat.sonyconnect", category: "bluetooth")
+
+// Which generation of Sony's MDR protocol the connected device speaks. Set
+// during service discovery from whichever service UUID the device advertises.
+enum SonyProtocolVersion {
+    case v1
+    case v2
+}
 
 final class BluetoothClient: NSObject {
     enum Status {
@@ -28,6 +46,10 @@ final class BluetoothClient: NSObject {
     // goes — independent of whether our SPP control channel is open.
     // Passes (reachable, deviceName?).
     var onReachabilityChange: ((Bool, String?) -> Void)?
+
+    // Valid once status reaches .connected; reflects which service UUID opened
+    // the channel. Callers use it to pick the matching opcode set.
+    private(set) var protocolVersion: SonyProtocolVersion = .v1
 
     private var channel: IOBluetoothRFCOMMChannel?
     private var device: IOBluetoothDevice?
@@ -184,9 +206,25 @@ final class BluetoothClient: NSObject {
 
     @discardableResult
     private func findServiceAndOpen(device: IOBluetoothDevice) -> Bool {
-        let uuid = IOBluetoothSDPUUID(bytes: sonyServiceUUIDBytes, length: sonyServiceUUIDBytes.count)
-        guard let record = device.getServiceRecord(for: uuid) else {
-            FileLogger.shared.log("bt", "Sony service UUID not found in cached SDP records")
+        // Try the original UUID first, then the second-generation one. A device
+        // advertises exactly one of them, and that choice determines which
+        // opcode set the rest of the session must use.
+        let candidates: [(SonyProtocolVersion, [UInt8])] = [
+            (.v1, sonyServiceUUIDBytes),
+            (.v2, sonyServiceUUIDV2Bytes),
+        ]
+
+        var found: (version: SonyProtocolVersion, record: IOBluetoothSDPServiceRecord)?
+        for (version, bytes) in candidates {
+            let uuid = IOBluetoothSDPUUID(bytes: bytes, length: bytes.count)
+            if let record = device.getServiceRecord(for: uuid) {
+                found = (version, record)
+                break
+            }
+        }
+
+        guard let (version, record) = found else {
+            FileLogger.shared.log("bt", "Neither v1 nor v2 Sony service UUID found in cached SDP records")
             if let allRecords = device.services as? [IOBluetoothSDPServiceRecord] {
                 for r in allRecords {
                     var ch: BluetoothRFCOMMChannelID = 0
@@ -196,7 +234,9 @@ final class BluetoothClient: NSObject {
             }
             return false
         }
-        FileLogger.shared.log("bt", "Sony service found: \(record.getServiceName() ?? "?")")
+
+        protocolVersion = version
+        FileLogger.shared.log("bt", "Sony service found: \(record.getServiceName() ?? "?") protocol=\(version)")
 
         var channelID: BluetoothRFCOMMChannelID = 0
         let getResult = record.getRFCOMMChannelID(&channelID)
@@ -226,7 +266,7 @@ extension BluetoothClient {
             return
         }
         if !findServiceAndOpen(device: device) {
-            self.status = .failed(reason: "Sony service UUID not advertised by device")
+            self.status = .failed(reason: "No Sony control service (v1 or v2) advertised by device")
         }
     }
 }

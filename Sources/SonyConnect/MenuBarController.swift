@@ -342,6 +342,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             eqPresetMenuItem.isHidden = true
         }
 
+        // Second-generation devices expose no touch-panel setting and no
+        // verified power-off opcode, so hide both instead of showing controls
+        // that would silently do nothing. Set before the disconnected early
+        // return so the rows reappear once a v1 device connects.
+
         if !state.isConnected {
             touchMenuItem.title = "Touch Sensor: —"
             touchMenuItem.state = .off
@@ -356,8 +361,6 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             powerOffMenuItem.isEnabled = false
             return
         }
-        powerOffMenuItem.isEnabled = true
-
         // Touch sensor row
         switch state.touchSensorEnabled {
         case .some(true):
@@ -445,7 +448,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     // Rebuilt on demand: "When taken off" only exists on v2, so the option
     // list depends on the connected device.
     private func updateAutoOffSubmenu(state: HeadphonesController.State) {
-        let options = AutoPowerOffOption.selectable
+        let options = AutoPowerOffOption.selectable(isV2: state.protocolIsV2)
         if autoOffSubmenu.items.count != options.count {
             autoOffSubmenu.removeAllItems()
             for option in options {
