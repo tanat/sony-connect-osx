@@ -10,6 +10,8 @@
     <string>SonyConnect</string>
     <key>CFBundleDisplayName</key>
     <string>SonyConnect</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleShortVersionString</key>
     <string>0.1.0</string>
     <key>CFBundleVersion</key>

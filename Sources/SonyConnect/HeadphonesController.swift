@@ -23,6 +23,8 @@ final class HeadphonesController {
         var eqBands: [Int] = []
         var autoOffEnabled: Bool = false
         var statusDescription: String = "Disconnected"
+        var ambientLevel: Int = 20          // 0...20, meaningful only while ncMode == .ambient
+        var ambientFocusOnVoice: Bool = false
     }
 
     private(set) var state = State() {
@@ -93,8 +95,9 @@ final class HeadphonesController {
     private var touchPanelIsListType: Bool = false
     private var ncSettingType: UInt8 = 0x02  // device-reported; default DUAL_SINGLE_OFF for WH-1000XM4
     private var asmSettingType: UInt8 = 0x01 // device-reported; default LEVEL_ADJUSTMENT
-    private var asmId: UInt8 = 0x00          // NORMAL ambient mode
-    private static let maxAsmLevel: UInt8 = 20
+    private var asmId: UInt8 = 0x00          // ambient mode: 0x00 NORMAL, 0x01 VOICE (Focus on Voice)
+    private var currentAmbientLevel: UInt8 = HeadphonesController.maxAmbientLevel  // retained across NC-mode switches
+    static let maxAmbientLevel: UInt8 = 20
 
     init() {
         policy = ConnectionPolicy(audio: audioMonitor)
@@ -194,6 +197,29 @@ final class HeadphonesController {
         }
     }
 
+    func setAmbientLevel(_ level: Int) {
+        guard initialized else { return }
+        let clamped = UInt8(clamping: min(max(level, 0), Int(Self.maxAmbientLevel)))
+        currentAmbientLevel = clamped
+        state.ambientLevel = Int(clamped)
+        guard state.ncMode == .ambient else { return }
+        sendNcasmSet(mode: .ambient)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            self?.sendNcasmGet()
+        }
+    }
+
+    func setAmbientFocusOnVoice(_ enabled: Bool) {
+        guard initialized else { return }
+        asmId = enabled ? 0x01 : 0x00
+        state.ambientFocusOnVoice = enabled
+        guard state.ncMode == .ambient else { return }
+        sendNcasmSet(mode: .ambient)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            self?.sendNcasmGet()
+        }
+    }
+
     func toggleSpeakToChat() {
         guard initialized else { return }
         let next = !(state.speakToChatEnabled ?? false)
@@ -252,7 +278,7 @@ final class HeadphonesController {
         // Payload: 68 02 effect ncType ncValue asmType asmId asmLevel
         let effect: UInt8 = (mode == .off) ? 0x00 : 0x11   // OFF or ADJUSTMENT_COMPLETION
         let ncValue: UInt8 = (mode == .noiseCancelling) ? 0x02 : 0x00 // DUAL or OFF
-        let asmLevel: UInt8 = (mode == .ambient) ? Self.maxAsmLevel : 0
+        let asmLevel: UInt8 = (mode == .ambient) ? currentAmbientLevel : 0
         let payload: [UInt8] = [
             Opcode.ncasmSet,
             Opcode.ncasmCombinedInquiredType,
@@ -538,6 +564,11 @@ final class HeadphonesController {
         asmSettingType = payload[5]
         asmId = payload[6]
         let asmLevel = payload[7]
+        // Device reports 0 while NC/Off is active — only overwrite our
+        // remembered level when it reports an actual ambient level, so
+        // switching back to Ambient later restores the last level instead
+        // of resetting to 0.
+        if asmLevel > 0 { currentAmbientLevel = asmLevel }
 
         let mode: NCMode
         if effect == 0x00 {
@@ -550,6 +581,8 @@ final class HeadphonesController {
             mode = .off
         }
         state.ncMode = mode
+        state.ambientLevel = Int(currentAmbientLevel)
+        state.ambientFocusOnVoice = (asmId == 0x01)
         FileLogger.shared.log("state",
             "NCASM = \(mode.rawValue) (effect=\(String(format: "0x%02X", effect)) ncT=\(ncSettingType) ncV=\(ncValue) asmT=\(asmSettingType) asmL=\(asmLevel))")
     }

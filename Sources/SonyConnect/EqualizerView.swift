@@ -10,6 +10,7 @@ final class EqualizerView: NSView {
     private var sliders: [NSSlider] = []
     private var labels: [NSTextField] = []
 
+    private let axisInset: CGFloat = 20   // room for the +10/0/-10 reference column
     private let hInset: CGFloat = 16
     private let topPad: CGFloat = 8
     private let sliderHeight: CGFloat = 58
@@ -22,6 +23,21 @@ final class EqualizerView: NSView {
         let h = 8 + 58 + 2 + 13 + 6
         super.init(frame: NSRect(x: 0, y: 0, width: 300, height: CGFloat(h)))
         autoresizingMask = [.width]
+        addAxisLabels()
+    }
+
+    // Static +10/0/-10 reference column on the left, matching the official
+    // Sony app's EQ scale — shared by all bands, not rebuilt per band.
+    private func addAxisLabels() {
+        let sliderY = bottomPad + labelHeight + labelGap
+        for (value, yFraction) in [("+10", 1.0), ("0", 0.5), ("-10", 0.0)] {
+            let l = makeLabel(value)
+            l.alignment = .left
+            let y = sliderY + CGFloat(yFraction) * sliderHeight - labelHeight / 2
+            l.frame = NSRect(x: 2, y: y, width: axisInset - 4, height: labelHeight)
+            l.autoresizingMask = [.maxXMargin]
+            addSubview(l)
+        }
     }
 
     required init?(coder: NSCoder) { fatalError("not implemented") }
@@ -64,12 +80,17 @@ final class EqualizerView: NSView {
     }
 
     private func makeBandSlider() -> NSSlider {
-        let s = NSSlider()
+        let s = ScrollableSlider()
         s.isVertical = true
         s.minValue = 0
         s.maxValue = 20            // Sony EQ bands: 0…20 (10 = flat)
         s.isContinuous = false     // commit on mouse-up, don't flood RFCOMM
         s.controlSize = .mini
+        // One tick per integer step so drags snap to a value and the notches
+        // are visible, matching the official app's stepped feel.
+        s.numberOfTickMarks = 21
+        s.allowsTickMarkValuesOnly = true
+        s.tickMarkPosition = .trailing
         s.target = self
         s.action = #selector(bandChanged)
         return s
@@ -92,11 +113,11 @@ final class EqualizerView: NSView {
     override func layout() {
         super.layout()
         guard !sliders.isEmpty else { return }
-        let area = bounds.width - 2 * hInset
+        let area = bounds.width - axisInset - 2 * hInset
         let slot = area / CGFloat(sliders.count)
         let sliderY = bottomPad + labelHeight + labelGap
         for (i, slider) in sliders.enumerated() {
-            let centerX = hInset + slot * (CGFloat(i) + 0.5)
+            let centerX = axisInset + hInset + slot * (CGFloat(i) + 0.5)
             slider.frame = NSRect(x: centerX - sliderWidth / 2, y: sliderY,
                                   width: sliderWidth, height: sliderHeight)
             labels[i].frame = NSRect(x: centerX - slot / 2, y: bottomPad,
