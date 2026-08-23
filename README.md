@@ -37,6 +37,8 @@ device- and firmware-specific.
 
 - Noise Cancelling, Ambient Sound, and Off.
 - Auto Ambient Sound and its discovered sensitivity control when supported.
+  It currently depends on Listening Mode being set to Ambient and is a little buggy,
+  but the feature works.
 - Listening Mode: Standard, Background Music, and Cinema.
 - Background Music room profiles: My Room, Living Room, and Cafe.
 - Speak-to-Chat on/off with discovered sensitivity and timeout settings.
@@ -46,10 +48,6 @@ device- and firmware-specific.
 
 ### Menu-bar and reliability work
 
-- XM6 headphone icon with optional battery percentage.
-- Live battery level and charging-state notifications.
-- Mac output-volume slider with live refresh while the menu is open, including
-  changes made with the keyboard volume keys.
 - Reconnect and recovery behavior for a hidden or stale menu-bar item.
 - Menu views that remain open while supported settings are changed.
 - Auto Layout ordering fixes for macOS versions that reject cross-hierarchy
@@ -132,8 +130,9 @@ Package.swift                   — Swift Package Manager manifest
 - Hardware validation has been performed primarily with one WH-1000XM6 setup.
 - The app is ad-hoc signed only; it is not a notarized commercial distribution.
 - Feature availability depends on what the connected headphones advertise.
-- Codec readout, firmware-version readout, DSEE Extreme, Adaptive Sound Control,
-  Quick Access assignment, and a Dock application are not part of this release.
+- Battery percentage, live volume control, codec readout, firmware-version readout,
+  DSEE Extreme, Adaptive Sound Control, Quick Access assignment, and a Dock
+  application are not part of this release.
 
 ## Credits and relationship to upstream
 

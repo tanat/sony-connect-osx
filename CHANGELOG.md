@@ -18,8 +18,8 @@ project and the Stetco-lab v2 fork.
 - Wearing Detection with pause-media-on-removal behavior.
 - Auto Ambient Sound and discovered sensitivity support where advertised.
 - Speak-to-Chat configuration controls.
-- Live battery percentage and charging notifications.
-- Live menu-open volume refresh for keyboard volume changes.
+- Auto Ambient Sound works when Listening Mode is set to Ambient, although the
+  current implementation is still a little buggy.
 
 ### Reliability and UI
 
@@ -39,6 +39,7 @@ project and the Stetco-lab v2 fork.
 ### Not included
 
 - Codec and firmware-version readout.
+- Battery percentage and live volume control.
 - DSEE Extreme.
 - Adaptive Sound Control.
 - Quick Access assignment.
