@@ -130,7 +130,7 @@ final class HeadphonesController {
         static let eqRet: UInt8 = 0x57
         static let eqSet: UInt8 = 0x58           // 58 00 <preset> 00  |  58 00 A0 06 <6 bands>
         static let eqNotify: UInt8 = 0x59
-        static let eqInquiredType: UInt8 = 0x00
+        static let eqInquiredType: UInt8 = 0x04
         // Power off exists on v2 too, just under its own opcode rather than
         // v1's 0x22 (which v2 reuses for BATTERY_GET).
         static let powerSet: UInt8 = 0x24        // 24 03 01
@@ -378,14 +378,26 @@ final class HeadphonesController {
         // the next SPP session; 0xFF makes it persist (this is what the Sony
         // app does — see nf/c.java j(EqPresetId, int[])).
         // v2 has no UNSPECIFIED preset — custom bands go out under CUSTOM (0xA0).
-        var payload: [UInt8] = isV2
-            ? [V2Opcode.eqSet, V2Opcode.eqInquiredType,
-               Opcode.eqPresetCustom, UInt8(bands.count)]
-            : [Opcode.eqSetParam, Opcode.eqPresetInquiredType,
-               Opcode.eqPresetUnspecified, UInt8(bands.count)]
-        payload.append(contentsOf: bands.map { UInt8(clamping: $0) })
-        sendPayload(payload, label: "EQ SET custom bands=\(bands)")
-        state.eqCurrentPresetId = Opcode.eqPresetCustom
+        var payload: [UInt8]
+        if isV2 {
+            // XM6/v2 exposes EQ as -6...+6 in the UI, but stores each band
+            // as 0...12 on the wire, with raw 6 representing 0 dB.
+            let encoded = bands.map { UInt8(clamping: min(max($0 + 6, 0), 12)) }
+            payload = [V2Opcode.eqSet, V2Opcode.eqInquiredType,
+                       state.eqCurrentPresetId == 0xA1 ? 0xA1 : Opcode.eqPresetCustom,
+                       UInt8(encoded.count)]
+            payload.append(contentsOf: encoded)
+            sendPayload(payload, label: "EQ SET custom bands=\(bands) raw=\(encoded)")
+        } else {
+            payload = [Opcode.eqSetParam, Opcode.eqPresetInquiredType,
+                       Opcode.eqPresetUnspecified, UInt8(bands.count)]
+            payload.append(contentsOf: bands.map { UInt8(clamping: $0) })
+            sendPayload(payload, label: "EQ SET custom bands=\(bands)")
+        }
+
+        if state.eqCurrentPresetId != 0xA1 {
+            state.eqCurrentPresetId = Opcode.eqPresetCustom
+        }
         state.eqBands = bands
     }
 
@@ -832,15 +844,12 @@ final class HeadphonesController {
     // in firmware and match the set v1 devices report.
     private static let v2EqPresets: [EqPreset] = [
         EqPreset(id: 0x00, name: "Off"),
-        EqPreset(id: 0x10, name: "Bright"),
-        EqPreset(id: 0x11, name: "Excited"),
-        EqPreset(id: 0x12, name: "Mellow"),
-        EqPreset(id: 0x13, name: "Relaxed"),
-        EqPreset(id: 0x14, name: "Vocal"),
-        EqPreset(id: 0x15, name: "Treble Boost"),
-        EqPreset(id: 0x16, name: "Bass Boost"),
-        EqPreset(id: 0x17, name: "Speech"),
-        EqPreset(id: Opcode.eqPresetCustom, name: "Custom"),
+        EqPreset(id: 0x30, name: "Heavy"),
+        EqPreset(id: 0x31, name: "Clear"),
+        EqPreset(id: 0x32, name: "Hard"),
+        EqPreset(id: 0x33, name: "Soft"),
+        EqPreset(id: Opcode.eqPresetCustom, name: "Custom 1"),
+        EqPreset(id: 0xA1, name: "Custom 2"),
     ]
 
     private func interpretV2(_ packet: SonyPacket) {
@@ -938,11 +947,12 @@ final class HeadphonesController {
         let preset = payload[2]
         let count = Int(payload[3])
         guard payload.count >= 4 + count else { return }
-        let bands = payload[4..<(4 + count)].map { Int($0) }
+        let rawBands = payload[4..<(4 + count)].map { Int($0) }
+        let bands = rawBands.map { $0 - 6 }
         state.eqCurrentPresetId = preset
         state.eqBands = bands
         FileLogger.shared.log("state",
-            "EQ v2 current=0x\(String(format: "%02X", preset)) bands=\(bands)")
+            "EQ v2 current=0x\(String(format: "%02X", preset)) bands=\(bands) raw=\(rawBands)")
     }
 
     private func parseBtnModeV2(_ payload: [UInt8]) {
