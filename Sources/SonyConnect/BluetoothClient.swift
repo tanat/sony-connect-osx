@@ -99,8 +99,16 @@ final class BluetoothClient: NSObject {
 
     private func targetPairedDevice() -> IOBluetoothDevice? {
         guard let raw = IOBluetoothDevice.pairedDevices() else { return nil }
-        let devices = raw.compactMap { $0 as? IOBluetoothDevice }
-        return devices.first { isTargetDevice($0) }
+
+        let devices = raw
+            .compactMap { $0 as? IOBluetoothDevice }
+            .filter { isTargetDevice($0) }
+
+        if let connected = devices.first(where: { $0.isConnected() }) {
+            return connected
+        }
+
+        return devices.first
     }
 
     private func isTargetDevice(_ device: IOBluetoothDevice) -> Bool {
