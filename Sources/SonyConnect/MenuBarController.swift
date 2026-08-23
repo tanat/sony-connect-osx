@@ -17,6 +17,14 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private var eqSubmenuBuilt = false
     private let eqBandsMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let eqView = EqualizerView()
+
+    private let multipointMenuItem = NSMenuItem(
+        title: "Multipoint",
+        action: nil,
+        keyEquivalent: ""
+    )
+    private let multipointSubmenu = NSMenu(title: "Multipoint")
+
     private let touchMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let touchButton = NSButton()
 
@@ -116,6 +124,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         eqPresetListItem.view = eqPresetListView
         eqView.onBandsChanged = { [weak self] bands in self?.controller.setEqBands(bands) }
         eqBandsMenuItem.view = eqView
+
+        multipointMenuItem.submenu = multipointSubmenu
+        multipointMenuItem.isHidden = true
+        popupMenu.addItem(multipointMenuItem)
 
         popupMenu.addItem(.separator())
 
@@ -424,6 +436,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             eqPresetMenuItem.isHidden = true
         }
 
+        updateMultipointSubmenu(state: state)
+
         // Second-generation devices expose no touch-panel setting and no
         // verified power-off opcode, so hide both instead of showing controls
         // that would silently do nothing. Set before the disconnected early
@@ -492,6 +506,82 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             speakToChatButton.state = .off
         case .none:
             speakToChatButton.state = .off
+        }
+    }
+
+    private func updateMultipointSubmenu(state: HeadphonesController.State) {
+        guard state.isWH1000XM6, !state.connectedDevices.isEmpty else {
+            multipointMenuItem.isHidden = true
+            return
+        }
+
+        multipointMenuItem.isHidden = false
+        multipointSubmenu.removeAllItems()
+
+        // Before a fresh 0x39 arrives this process may only have the persisted
+        // known-device cache. Do not present old connection slots as current.
+        if !state.connectedDevicesAreLive {
+            multipointMenuItem.title = "Multipoint: Last Known"
+
+            let devices = state.connectedDevices.sorted {
+                $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+            }
+
+            for device in devices {
+                let item = NSMenuItem(
+                    title: device.name,
+                    action: nil,
+                    keyEquivalent: ""
+                )
+                item.isEnabled = false
+                item.toolTip = device.address
+                multipointSubmenu.addItem(item)
+            }
+
+            return
+        }
+
+        let connected = state.connectedDevices
+            .filter { $0.isConnected }
+            .sorted {
+                ($0.connectionSlot ?? Int.max) < ($1.connectionSlot ?? Int.max)
+            }
+
+        let disconnected = state.connectedDevices
+            .filter { !$0.isConnected }
+            .sorted {
+                $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+            }
+
+        multipointMenuItem.title = "Multipoint: \(connected.count) Connected"
+
+        for device in connected {
+            let slot = device.connectionSlot ?? 0
+            let item = NSMenuItem(
+                title: "\(device.name)  ·  Device \(slot)",
+                action: nil,
+                keyEquivalent: ""
+            )
+            item.state = .on
+            item.isEnabled = false
+            item.toolTip = device.address
+            multipointSubmenu.addItem(item)
+        }
+
+        if !connected.isEmpty && !disconnected.isEmpty {
+            multipointSubmenu.addItem(.separator())
+        }
+
+        for device in disconnected {
+            let item = NSMenuItem(
+                title: device.name,
+                action: nil,
+                keyEquivalent: ""
+            )
+            item.state = .off
+            item.isEnabled = false
+            item.toolTip = device.address
+            multipointSubmenu.addItem(item)
         }
     }
 

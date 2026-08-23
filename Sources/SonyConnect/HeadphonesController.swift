@@ -10,6 +10,17 @@ final class HeadphonesController {
         let name: String
     }
 
+    struct ConnectedDevice {
+        let address: String
+        let name: String
+        let connectionSlot: Int?
+        let metadata: [UInt8]
+
+        var isConnected: Bool {
+            connectionSlot != nil
+        }
+    }
+
     struct State {
         var isConnected: Bool = false       // SPP control channel is open
         var deviceReachable: Bool = false   // headphones present at the BT (ACL) level
@@ -21,6 +32,8 @@ final class HeadphonesController {
         var eqPresets: [EqPreset] = []
         var eqCurrentPresetId: UInt8? = nil
         var eqBands: [Int] = []
+        var connectedDevices: [ConnectedDevice] = []
+        var connectedDevicesAreLive: Bool = false
         var autoOffOption: AutoPowerOffOption = .off
         var statusDescription: String = "Disconnected"
         var ambientLevel: Int = 20          // 0...20, meaningful only while ncMode == .ambient
@@ -112,6 +125,10 @@ final class HeadphonesController {
         static let batteryRet: UInt8 = 0x23
         static let batteryNotify: UInt8 = 0x25
         static let batterySingleInquiredType: UInt8 = 0x00
+
+        // Device connection/list status. XM6 sends this spontaneously and
+        // includes known Bluetooth devices plus per-device metadata.
+        static let connectedDevicesNotify: UInt8 = 0x39
         static let ncasmGet: UInt8 = 0x66        // 66 <t>       -> RET 67 <t> 01 <effect> <type> <voice> <level>
         static let ncasmRet: UInt8 = 0x67
         static let ncasmSet: UInt8 = 0x68        // 68 <t> 01 <effect> <type> <voice> <level>
@@ -193,6 +210,61 @@ final class HeadphonesController {
     private var currentAmbientLevel: UInt8 = HeadphonesController.maxAmbientLevel  // retained across NC-mode switches
     static let maxAmbientLevel: UInt8 = 20
 
+    private static let connectedDevicesCacheKey = "XM6KnownDevices"
+
+    private func loadConnectedDevicesCache() {
+        guard let rows = UserDefaults.standard.array(
+            forKey: Self.connectedDevicesCacheKey
+        ) as? [[String: String]] else {
+            return
+        }
+
+        let devices = rows.compactMap { row -> ConnectedDevice? in
+            guard let address = row["address"],
+                  let name = row["name"],
+                  !address.isEmpty,
+                  !name.isEmpty else {
+                return nil
+            }
+
+            return ConnectedDevice(
+                address: address,
+                name: name,
+                connectionSlot: nil,
+                metadata: []
+            )
+        }
+
+        guard !devices.isEmpty else { return }
+
+        state.connectedDevices = devices
+        state.connectedDevicesAreLive = false
+
+        FileLogger.shared.log(
+            "devices",
+            "loaded \(devices.count) cached XM6 device(s)"
+        )
+    }
+
+    private func saveConnectedDevicesCache(_ devices: [ConnectedDevice]) {
+        let rows: [[String: String]] = devices.map {
+            [
+                "address": $0.address,
+                "name": $0.name
+            ]
+        }
+
+        UserDefaults.standard.set(
+            rows,
+            forKey: Self.connectedDevicesCacheKey
+        )
+
+        FileLogger.shared.log(
+            "devices",
+            "saved \(devices.count) XM6 device(s) to cache"
+        )
+    }
+
     init() {
         policy = ConnectionPolicy()
         bluetooth.onStatus = { [weak self] s in self?.handleStatus(s) }
@@ -220,6 +292,7 @@ final class HeadphonesController {
             self?.handleReachability(reachable, name: name)
         }
         state.autoOffOption = autoOff.option
+        loadConnectedDevicesCache()
         bluetooth.startReachabilityMonitoring()
         policy.start()
     }
@@ -284,10 +357,17 @@ final class HeadphonesController {
     }
 
     func menuOpened() {
+        // While the menu is open SonyConnect owns the control session.
+        // If RFCOMM drops unexpectedly, BluetoothClient may retry.
+        bluetooth.setAutoReconnectEnabled(true)
         policy.menuOpened()
     }
 
     func menuClosed() {
+        // Once the menu closes, do not fight another Sony controller
+        // (for example the phone app) for RFCOMM. The existing policy still
+        // keeps the current session alive for its 10-second release grace.
+        bluetooth.setAutoReconnectEnabled(false)
         policy.menuClosed()
     }
 
@@ -687,6 +767,9 @@ final class HeadphonesController {
             state.eqPresets = []
             state.eqCurrentPresetId = nil
             state.eqBands = []
+            // Keep the last XM6 device list across an intentional RFCOMM
+            // release. Opcode 0x39 is event-driven and is not guaranteed to
+            // be retransmitted every time the control channel is reopened.
             // Device may still be present (we just closed SPP for battery
             // saving) — reflect that instead of a flat "Disconnected".
             state.statusDescription = state.deviceReachable ? "\(deviceName) (idle)" : "Disconnected"
@@ -711,6 +794,7 @@ final class HeadphonesController {
             protocolVersion = bluetooth.protocolVersion
             state.protocolIsV2 = isV2
             state.isWH1000XM6 = name.localizedCaseInsensitiveContains("WH-1000XM6")
+            state.connectedDevicesAreLive = false
             FileLogger.shared.log("state",
                 "service UUID suggests \(isV2 ? "v2" : "v1"); awaiting INIT reply to confirm")
             policy.setCurrentlyConnected(true)
@@ -731,6 +815,9 @@ final class HeadphonesController {
             state.eqPresets = []
             state.eqCurrentPresetId = nil
             state.eqBands = []
+            // Keep the last XM6 device list across an intentional RFCOMM
+            // release. Opcode 0x39 is event-driven and is not guaranteed to
+            // be retransmitted every time the control channel is reopened.
             state.statusDescription = state.deviceReachable ? "\(deviceName) (idle)" : "Disconnected"
         }
     }
@@ -886,10 +973,114 @@ final class HeadphonesController {
             parseTouchSensorV2(packet.payload)
         case V2Opcode.initReply:
             break
+        case V2Opcode.connectedDevicesNotify:
+            parseConnectedDevicesV2(packet.payload)
         default:
             FileLogger.shared.log("state",
                 "v2 unhandled opcode 0x\(String(format: "%02X", opcode))")
         }
+    }
+
+    private func parseConnectedDevicesV2(_ payload: [UInt8]) {
+        // XM6 device-list notification:
+        //
+        // 39 02 <count>
+        //   <17-byte ASCII Bluetooth address>
+        //   <4 metadata bytes>
+        //   <1-byte UTF-8 name length>
+        //   <name>
+        //
+        // Observed connection semantics:
+        //   metadata[0] = 0x00 -> disconnected
+        //   metadata[0] = 0x01 -> connected, multipoint slot 1
+        //   metadata[0] = 0x02 -> connected, multipoint slot 2
+        //
+        // The remaining metadata bytes are retained verbatim because their
+        // meanings have not yet been established.
+
+        guard payload.count >= 3,
+              payload[0] == V2Opcode.connectedDevicesNotify,
+              payload[1] == 0x02 else {
+            return
+        }
+
+        let expectedCount = Int(payload[2])
+        var offset = 3
+        var devices: [ConnectedDevice] = []
+
+        for _ in 0..<expectedCount {
+            // 17-byte address + 4 metadata bytes + name-length byte.
+            guard offset + 22 <= payload.count else {
+                FileLogger.shared.log(
+                    "devices",
+                    "device-list truncated before entry \(devices.count + 1)"
+                )
+                break
+            }
+
+            let addressEnd = offset + 17
+            let address = String(
+                bytes: payload[offset..<addressEnd],
+                encoding: .ascii
+            ) ?? "<bad-address>"
+            offset = addressEnd
+
+            let metadata = Array(payload[offset..<(offset + 4)])
+            offset += 4
+
+            let nameLength = Int(payload[offset])
+            offset += 1
+
+            guard offset + nameLength <= payload.count else {
+                FileLogger.shared.log(
+                    "devices",
+                    "device-list truncated in name for entry \(devices.count + 1)"
+                )
+                break
+            }
+
+            let name = String(
+                bytes: payload[offset..<(offset + nameLength)],
+                encoding: .utf8
+            ) ?? "<bad-name>"
+            offset += nameLength
+
+            let slot: Int?
+            switch metadata[0] {
+            case 0x01:
+                slot = 1
+            case 0x02:
+                slot = 2
+            default:
+                slot = nil
+            }
+
+            devices.append(
+                ConnectedDevice(
+                    address: address,
+                    name: name,
+                    connectionSlot: slot,
+                    metadata: metadata
+                )
+            )
+        }
+
+        guard !devices.isEmpty else { return }
+
+        // Packet ordering changes as devices connect/disconnect, so identity is
+        // always the Bluetooth address, never the array position.
+        state.connectedDevices = devices
+        state.connectedDevicesAreLive = true
+        saveConnectedDevicesCache(devices)
+
+        let summary = devices.map { device -> String in
+            if let slot = device.connectionSlot {
+                return "\(device.name)=slot\(slot)"
+            }
+            return "\(device.name)=disconnected"
+        }.joined(separator: ", ")
+
+        FileLogger.shared.log("devices", summary)
     }
 
     private func parseGsCapabilityV2(_ payload: [UInt8]) {

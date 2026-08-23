@@ -143,6 +143,19 @@ final class BluetoothClient: NSObject {
         onReachabilityChange?(false, device.name)
     }
 
+    func setAutoReconnectEnabled(_ enabled: Bool) {
+        suppressAutoReconnect = !enabled
+
+        if !enabled {
+            cancelReconnect()
+        }
+
+        FileLogger.shared.log(
+            "bt",
+            "automatic RFCOMM reconnect \(enabled ? "enabled" : "disabled")"
+        )
+    }
+
     func connect() {
         suppressAutoReconnect = false
         cancelReconnect()
