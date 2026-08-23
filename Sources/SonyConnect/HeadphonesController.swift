@@ -28,6 +28,7 @@ final class HeadphonesController {
         // Drives the few places the UI differs by generation (currently the
         // auto-power-off list, where only v2 can do "when taken off").
         var protocolIsV2: Bool = false
+        var isWH1000XM6: Bool = false
     }
 
     private(set) var state = State() {
@@ -682,6 +683,7 @@ final class HeadphonesController {
             // before we know.
             protocolVersion = bluetooth.protocolVersion
             state.protocolIsV2 = isV2
+            state.isWH1000XM6 = name.localizedCaseInsensitiveContains("WH-1000XM6")
             FileLogger.shared.log("state",
                 "service UUID suggests \(isV2 ? "v2" : "v1"); awaiting INIT reply to confirm")
             policy.setCurrentlyConnected(true)

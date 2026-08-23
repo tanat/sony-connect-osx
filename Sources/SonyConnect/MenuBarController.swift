@@ -448,7 +448,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     // Rebuilt on demand: "When taken off" only exists on v2, so the option
     // list depends on the connected device.
     private func updateAutoOffSubmenu(state: HeadphonesController.State) {
-        let options = AutoPowerOffOption.selectable(isV2: state.protocolIsV2)
+        let options = AutoPowerOffOption.selectable(
+            isV2: state.protocolIsV2,
+            isXM6: state.isWH1000XM6
+        )
         if autoOffSubmenu.items.count != options.count {
             autoOffSubmenu.removeAllItems()
             for option in options {

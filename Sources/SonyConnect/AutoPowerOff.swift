@@ -41,8 +41,11 @@ enum AutoPowerOffOption: Int, CaseIterable {
 
     // Only the headphones can detect being taken off, and only v2 exposes a
     // code for it, so v1 omits that entry.
-    static func selectable(isV2: Bool) -> [AutoPowerOffOption] {
-        isV2 ? allCases : allCases.filter { $0 != .whenTakenOff }
+    static func selectable(isV2: Bool, isXM6: Bool = false) -> [AutoPowerOffOption] {
+        if isXM6 {
+            return [.off, .whenTakenOff]
+        }
+        return isV2 ? allCases : allCases.filter { $0 != .whenTakenOff }
     }
 }
 
