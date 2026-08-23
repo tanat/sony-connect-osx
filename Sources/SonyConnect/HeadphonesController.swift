@@ -35,6 +35,22 @@ final class HeadphonesController {
         var connectedDevices: [ConnectedDevice] = []
         var connectedDevicesAreLive: Bool = false
         var playbackDeviceSlot: Int? = nil
+
+        // Sony V2 support-function discovery.
+        var v2Table1Features: Set<UInt8> = []
+        var v2Table2Features: Set<UInt8> = []
+
+        // Multipoint setting/device-management capability discovered from
+        // the headset rather than inferred only from the model name.
+        var multipointToggleAvailable: Bool = false
+        var multipointDeviceManagementAvailable: Bool = false
+        var multipointEnabled: Bool? = nil
+
+        // Multipoint changes require a Sony fixed-message confirmation.
+        // Keep the requested state pending until the headset confirms it
+        // or the Sony control session is reset/reconnected.
+        var pendingMultipointEnabled: Bool? = nil
+
         var autoOffOption: AutoPowerOffOption = .off
         var statusDescription: String = "Disconnected"
         var ambientLevel: Int = 20          // 0...20, meaningful only while ncMode == .ambient
@@ -60,6 +76,16 @@ final class HeadphonesController {
     private var initialized = false
     private var awaitingInitResponse = false
     private var deviceName: String = "headphones"
+
+    // Canonical V2 INIT tells us whether Table 2 is supported. Sony encodes
+    // MessageMdrV2EnableDisable.ENABLE as 0x00.
+    private var supportsV2Table2 = false
+    private var requestedV2Table1Features = false
+    private var requestedV2Table2Features = false
+
+    // General-setting slots are firmware-defined. Discover the slot by the
+    // capability subject ("MULTIPOINT_SETTING") rather than assuming D2.
+    private var multipointGsSlot: UInt8? = nil
 
     // Sony MDR V1 opcodes (from JADX decompile of Sony Headphones Connect
     // 9.3.0, package com.sony.songpal.tandemfamily.message.mdr.v1.table1).
@@ -139,6 +165,17 @@ final class HeadphonesController {
         static let sourceSwitchSetExtendedParam: UInt8 = 0x3C
         static let sourceSwitchNotifyExtendedParam: UInt8 = 0x3D
         static let sourceSwitchInquiryType: UInt8 = 0x01
+
+        // CONNECT_*_SUPPORT_FUNCTION is opcode-identical on V2 Table 1/2;
+        // the outer Sony data type chooses the table.
+        static let supportFunctionGet: UInt8 = 0x06
+        static let supportFunctionRet: UInt8 = 0x07
+        static let supportFunctionInquiryType: UInt8 = 0x00
+
+        // Table-2 pairing-device management.
+        static let pairingDeviceManagementInquiryType: UInt8 = 0x02
+        static let connectivityDisconnect: UInt8 = 0x00
+        static let connectivityConnect: UInt8 = 0x01
         static let ncasmGet: UInt8 = 0x66        // 66 <t>       -> RET 67 <t> 01 <effect> <type> <voice> <level>
         static let ncasmRet: UInt8 = 0x67
         static let ncasmSet: UInt8 = 0x68        // 68 <t> 01 <effect> <type> <voice> <level>
@@ -437,12 +474,139 @@ final class HeadphonesController {
         }
     }
 
+    func setMultipointEnabled(_ enabled: Bool) {
+        policy.userActivity()
+
+        guard initialized,
+              isV2,
+              state.multipointToggleAvailable,
+              let slot = multipointGsSlot else {
+            FileLogger.shared.log(
+                "cmd",
+                "MULTIPOINT SET skipped: capability/slot unavailable"
+            )
+            return
+        }
+
+        guard state.pendingMultipointEnabled == nil else {
+            FileLogger.shared.log(
+                "cmd",
+                "MULTIPOINT SET skipped: another multipoint change is pending"
+            )
+            return
+        }
+
+        guard state.multipointEnabled != enabled else {
+            FileLogger.shared.log(
+                "cmd",
+                "MULTIPOINT SET skipped: already \(enabled ? "ON" : "OFF")"
+            )
+            return
+        }
+
+        // GENERAL_SETTING_SET_PARAM:
+        //
+        // D8 <slot> 00 <value>
+        //
+        // 00 = BOOLEAN_TYPE
+        // value 00 = ON
+        // value 01 = OFF
+        //
+        // XM6 then emits a FIXED_MESSAGE alert asking permission to
+        // temporarily disconnect/reconnect Bluetooth devices.
+        state.pendingMultipointEnabled = enabled
+
+        let value: UInt8 = enabled ? 0x00 : 0x01
+
+        sendPayload(
+            [0xD8, slot, 0x00, value],
+            label: "MULTIPOINT \(enabled ? "ON" : "OFF")"
+        )
+    }
+
+    func setMultipointDeviceConnected(_ connected: Bool, address: String) {
+        policy.userActivity()
+
+        guard initialized,
+              isV2,
+              state.multipointDeviceManagementAvailable,
+              state.connectedDevicesAreLive else {
+            FileLogger.shared.log(
+                "cmd",
+                "MULTIPOINT DEVICE ACTION skipped: live device-management state unavailable"
+            )
+            return
+        }
+
+        guard let device = state.connectedDevices.first(where: {
+            $0.address.caseInsensitiveCompare(address) == .orderedSame
+        }) else {
+            FileLogger.shared.log(
+                "cmd",
+                "MULTIPOINT DEVICE ACTION skipped: unknown device \(address)"
+            )
+            return
+        }
+
+        if connected && device.isConnected {
+            FileLogger.shared.log(
+                "cmd",
+                "MULTIPOINT CONNECT skipped: \(device.name) already connected"
+            )
+            return
+        }
+
+        if !connected && !device.isConnected {
+            FileLogger.shared.log(
+                "cmd",
+                "MULTIPOINT DISCONNECT skipped: \(device.name) already disconnected"
+            )
+            return
+        }
+
+        let addressBytes = Array(device.address.utf8)
+        guard addressBytes.count == 17 else {
+            FileLogger.shared.log(
+                "cmd",
+                "MULTIPOINT DEVICE ACTION skipped: malformed Bluetooth address '\(device.address)'"
+            )
+            return
+        }
+
+        let action = connected
+            ? V2Opcode.connectivityConnect
+            : V2Opcode.connectivityDisconnect
+
+        sendPayload(
+            [
+                V2Opcode.sourceSwitchSetExtendedParam,
+                V2Opcode.pairingDeviceManagementInquiryType,
+                action
+            ] + addressBytes,
+            dataType: .command2,
+            label: "MULTIPOINT \(connected ? "CONNECT" : "DISCONNECT") -> \(device.name)"
+        )
+
+        // A 0x39 list notification should arrive when the connection changes.
+        // Re-read as a fallback in case that notification is lost.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            self?.sendConnectedDevicesGetV2()
+        }
+    }
+
     private func resetSessionState() {
         initialized = false
         awaitingInitResponse = false
         outgoingSequence = 0
         parser.reset()
         state.playbackDeviceSlot = nil
+        state.multipointEnabled = nil
+        state.pendingMultipointEnabled = nil
+
+        supportsV2Table2 = false
+        requestedV2Table1Features = false
+        requestedV2Table2Features = false
+        multipointGsSlot = nil
         touchPanelSlot = nil
         touchPanelIsListType = false
         ncSettingType = 0x02
@@ -748,6 +912,7 @@ final class HeadphonesController {
             // v2 has no general-setting capability family (so no touch panel)
             // and no EQ capability query — the preset ids are fixed.
             state.eqPresets = Self.v2EqPresets
+            requestV2SupportFunctionsIfNeeded()
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
                 self?.sendConnectedDevicesGetV2()
             }
@@ -804,6 +969,191 @@ final class HeadphonesController {
             return
         }
         sendPayload([Opcode.eqGetParam, Opcode.eqPresetInquiredType], label: "EQ GET")
+    }
+
+    private func requestV2SupportFunctionsIfNeeded() {
+        guard isV2 else { return }
+
+        if !requestedV2Table1Features {
+            requestedV2Table1Features = true
+            sendPayload(
+                [
+                    V2Opcode.supportFunctionGet,
+                    V2Opcode.supportFunctionInquiryType
+                ],
+                dataType: .command1,
+                label: "SUPPORT FUNCTIONS GET (v2 table1)"
+            )
+        }
+
+        if supportsV2Table2 && !requestedV2Table2Features {
+            requestedV2Table2Features = true
+            sendPayload(
+                [
+                    V2Opcode.supportFunctionGet,
+                    V2Opcode.supportFunctionInquiryType
+                ],
+                dataType: .command2,
+                label: "SUPPORT FUNCTIONS GET (v2 table2)"
+            )
+        }
+    }
+
+    private func requestAdvertisedGeneralSettingCapabilities() {
+        // Table-1 function IDs D1...D4 correspond to General Setting slots.
+        // Query only slots the headset explicitly advertised.
+        for slot in UInt8(0xD1)...UInt8(0xD4)
+            where state.v2Table1Features.contains(slot) {
+            sendPayload(
+                [0xD0, slot, 0x00],
+                label: "GS GET_CAPABILITY discovered slot 0x\(String(format: "%02X", slot))"
+            )
+        }
+    }
+
+    private func v2Table1FeatureName(_ value: UInt8) -> String {
+        switch value {
+        case 0x20: return "BATTERY_LEVEL_INDICATOR"
+        case 0x23: return "POWER_OFF"
+        case 0x24: return "AUTO_POWER_OFF"
+        case 0x25: return "AUTO_POWER_OFF_WITH_WEARING_DETECTION"
+        case 0x26: return "POWER_SAVING_MODE_ON_OFF"
+        case 0x2B: return "BATTERY_SAFE_MODE"
+        case 0x2C: return "CARING_CHARGE"
+        case 0x2D: return "BT_STANDBY"
+        case 0x2E: return "STAMINA"
+        case 0x50: return "PRESET_EQ"
+        case 0x55: return "CUSTOM_EQ"
+        case 0x64: return "NC_AND_AMBIENT_LEVEL"
+        case 0x90: return "FIXED_MESSAGE"
+        case 0xD1: return "GENERAL_SETTING_1"
+        case 0xD2: return "GENERAL_SETTING_2"
+        case 0xD3: return "GENERAL_SETTING_3"
+        case 0xD4: return "GENERAL_SETTING_4"
+        case 0xE1: return "CONNECTION_MODE"
+        case 0xE2: return "UPSCALING"
+        case 0xE4: return "BGM_MODE"
+        case 0xE5: return "UPMIX_CINEMA"
+        case 0xE6: return "LISTENING_OPTION"
+        case 0xE7: return "CLASSIC_LE_AUDIO_CONNECTION_MODE"
+        case 0xF1: return "PLAYBACK_CONTROL_BY_WEARING"
+        case 0xF6: return "WEARING_STATUS_DETECTOR"
+        case 0xFC: return "SMART_TALKING_MODE_TYPE2"
+        case 0xFD: return "QUICK_ACCESS"
+        case 0xFE: return "ASSIGNABLE_SETTING_WITH_LIMITATION"
+        case 0xFF: return "HEAD_GESTURE"
+        default:
+            return "UNKNOWN"
+        }
+    }
+
+    private func v2Table2FeatureName(_ value: UInt8) -> String {
+        switch value {
+        case 0x20: return "AUTO_STANDBY"
+        case 0x21: return "CHARGE_IN_USE"
+        case 0x22: return "CARING_CHARGE_WITH_THRESHOLD"
+        case 0x30: return "PAIRING_DEVICE_MANAGEMENT_CLASSIC_BT"
+        case 0x31: return "SOURCE_SWITCH_CONTROL"
+        case 0x32:
+            return "PAIRING_DEVICE_MANAGEMENT_WITH_CLASS_OF_DEVICE_CLASSIC_BT"
+        case 0x33:
+            return "PAIRING_DEVICE_MANAGEMENT_WITH_CLASS_OF_DEVICE_CLASSIC_LE"
+        case 0x34: return "MUSIC_HAND_OVER_SETTING"
+        case 0x40: return "VOICE_GUIDANCE"
+        case 0x41: return "VOICE_GUIDANCE_LANGUAGE"
+        case 0x42: return "VOICE_GUIDANCE_LANGUAGE_AND_VOLUME"
+        case 0x43: return "VOICE_GUIDANCE_5_STEP_VOLUME"
+        case 0x44: return "VOICE_GUIDANCE_LANGUAGE_SWITCH"
+        case 0x45: return "VOICE_GUIDANCE_ON_OFF"
+        case 0x50: return "SAFE_LISTENING_HBS_1"
+        case 0x51: return "SAFE_LISTENING_TWS_1"
+        case 0x52: return "SAFE_LISTENING_HBS_2"
+        case 0x53: return "SAFE_LISTENING_TWS_2"
+        case 0x54: return "SAFE_VOLUME_CONTROL"
+        case 0xF0: return "WEARING_STATUS_CHECKER"
+        case 0xF2: return "QUICK_ACCESS_EASY_SETTING"
+        case 0xF3: return "AUTO_VOLUME_OPTIMIZER"
+        case 0xF4: return "AUTO_VOLUME_WITH_LIMITATION"
+        case 0xF6: return "WEARING_POSITION"
+        case 0xF8: return "LINK_AUTO_SWITCH_FOR_HEADSETS"
+        case 0xF9: return "MIC_ON_OFF_BY_HEADPHONE_OPERATION"
+        case 0xFA: return "FUNCTION_CHANGE"
+        default:
+            return "UNKNOWN"
+        }
+    }
+
+    private func parseV2SupportFunctions(
+        _ payload: [UInt8],
+        table: Int
+    ) {
+        guard payload.count >= 3,
+              payload[0] == V2Opcode.supportFunctionRet,
+              payload[1] == V2Opcode.supportFunctionInquiryType else {
+            return
+        }
+
+        let count = Int(payload[2])
+        let expectedSize = 3 + count * 2
+
+        guard payload.count == expectedSize else {
+            FileLogger.shared.log(
+                "features",
+                "Table \(table) support list rejected: expected \(expectedSize) bytes, got \(payload.count)"
+            )
+            return
+        }
+
+        var features = Set<UInt8>()
+        var descriptions: [String] = []
+
+        for index in 0..<count {
+            let base = 3 + index * 2
+            let feature = payload[base]
+            let priority = payload[base + 1]
+
+            features.insert(feature)
+
+            let name = table == 1
+                ? v2Table1FeatureName(feature)
+                : v2Table2FeatureName(feature)
+
+            descriptions.append(
+                String(
+                    format: "0x%02X %@[p=%u]",
+                    feature,
+                    name,
+                    priority
+                )
+            )
+        }
+
+        if table == 1 {
+            state.v2Table1Features = features
+
+            if features.contains(0x90) {
+                sendPayload(
+                    [0x94, 0x00, 0x00],
+                    label: "FIXED MESSAGE ALERTS ENABLE"
+                )
+            }
+
+            requestAdvertisedGeneralSettingCapabilities()
+        } else {
+            state.v2Table2Features = features
+
+            // Upstream considers any of these device-management variants
+            // sufficient support for pairing-device management.
+            state.multipointDeviceManagementAvailable =
+                features.contains(0x30) ||
+                features.contains(0x32) ||
+                features.contains(0x33)
+        }
+
+        FileLogger.shared.log(
+            "features",
+            "Table \(table) (\(count)): \(descriptions.joined(separator: ", "))"
+        )
     }
 
     private func sendConnectedDevicesGetV2() {
@@ -933,10 +1283,18 @@ final class HeadphonesController {
             }
 
             switch opcode {
+            case V2Opcode.supportFunctionRet:
+                parseV2SupportFunctions(packet.payload, table: 2)
+
             case V2Opcode.connectedDevicesRet, V2Opcode.connectedDevicesNotify:
                 parseConnectedDevicesV2(packet.payload)
+
             case V2Opcode.sourceSwitchNotifyExtendedParam:
+                // 0x3D is shared by SOURCE_SWITCH_CONTROL (type 01) and
+                // PAIRING_DEVICE_MANAGEMENT (type 02).
                 parseSourceSwitchNotifyV2(packet.payload)
+                parseConnectivityNotifyV2(packet.payload)
+
             default:
                 FileLogger.shared.log(
                     "state",
@@ -951,10 +1309,20 @@ final class HeadphonesController {
         }
         // Canonical INIT_REPLY (0x01 ...) OR any state-dump packet that
         // arrives after we sent INIT_REQUEST both signal "device is ready".
-        if awaitingInitResponse {
-            if opcode == Opcode.initReply {
-                latchProtocolVersion(fromInitReplyLength: packet.payload.count)
+        if opcode == Opcode.initReply {
+            latchProtocolVersion(fromInitReplyLength: packet.payload.count)
+
+            if packet.payload.count >= 8 {
+                // MessageMdrV2EnableDisable: ENABLE = 0x00.
+                supportsV2Table2 = packet.payload[7] == 0x00
             }
+
+            if isV2 {
+                requestV2SupportFunctionsIfNeeded()
+            }
+        }
+
+        if awaitingInitResponse {
             completeInit()
         }
         // Opcode values overlap between generations with different meanings, so
@@ -1048,6 +1416,12 @@ final class HeadphonesController {
     private func interpretV2(_ packet: SonyPacket) {
         guard let opcode = packet.payload.first else { return }
         switch opcode {
+        case V2Opcode.supportFunctionRet:
+            parseV2SupportFunctions(packet.payload, table: 1)
+
+        case 0x99:
+            parseFixedMessageAlertV2(packet.payload)
+
         case V2Opcode.ncasmRet, V2Opcode.ncasmNotify:
             parseNcasmV2(packet.payload)
         case V2Opcode.batteryRet, V2Opcode.batteryNotify:
@@ -1061,12 +1435,198 @@ final class HeadphonesController {
         case Opcode.gsRetCapability:
             parseGsCapabilityV2(packet.payload)
         case V2Opcode.gsRet, V2Opcode.gsNotify:
+            parseMultipointSettingV2(packet.payload)
             parseTouchSensorV2(packet.payload)
         case V2Opcode.initReply:
             break
         default:
             FileLogger.shared.log("state",
                 "v2 unhandled opcode 0x\(String(format: "%02X", opcode))")
+        }
+    }
+
+    private func parseFixedMessageAlertV2(_ payload: [UInt8]) {
+        guard payload.count == 4,
+              payload[0] == 0x99,
+              payload[1] == 0x00 else {
+            return
+        }
+
+        let messageType = payload[2]
+        let actionType = payload[3]
+
+        FileLogger.shared.log(
+            "alert",
+            String(
+                format: "fixed message type=0x%02X action=0x%02X",
+                messageType,
+                actionType
+            )
+        )
+
+        guard state.pendingMultipointEnabled != nil else {
+            return
+        }
+
+        // Sony:
+        // 06 = DISCONNECT_CAUSED_BY_CHANGING_MULTIPOINT_LDAC_DISABLE
+        // 07 = DISCONNECT_CAUSED_BY_CHANGING_MULTIPOINT
+        guard messageType == 0x06 || messageType == 0x07 else {
+            return
+        }
+
+        // Sony's XM6 multipoint-change alert is POSITIVE_NEGATIVE.
+        guard actionType == 0x01 else {
+            FileLogger.shared.log(
+                "alert",
+                String(
+                    format:
+                        "multipoint alert has unsupported action type 0x%02X",
+                    actionType
+                )
+            )
+            return
+        }
+
+        // ALERT_SET_PARAM / FIXED_MESSAGE / message / POSITIVE
+        sendPayload(
+            [0x98, 0x00, messageType, 0x01],
+            label: "MULTIPOINT ALERT CONFIRM"
+        )
+
+        FileLogger.shared.log(
+            "alert",
+            "confirmed Sony multipoint reconnect requirement"
+        )
+
+        // If the headset remains on the control channel long enough,
+        // re-read the setting. Normally the XM6 temporarily disconnects
+        // and the normal reconnect/init path will read the final value.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            [weak self] in
+
+            guard let self,
+                  self.state.pendingMultipointEnabled != nil,
+                  let slot = self.multipointGsSlot else {
+                return
+            }
+
+            self.sendPayload(
+                [0xD6, slot],
+                label: "MULTIPOINT GET AFTER CONFIRM"
+            )
+        }
+    }
+
+    private func parseMultipointSettingV2(_ payload: [UInt8]) {
+        guard payload.count >= 4,
+              payload[0] == V2Opcode.gsRet ||
+                payload[0] == V2Opcode.gsNotify,
+              let slot = multipointGsSlot,
+              payload[1] == slot,
+              payload[2] == 0x00 else {
+            return
+        }
+
+        let enabled: Bool?
+        switch payload[3] {
+        case 0x00:
+            enabled = true
+        case 0x01:
+            enabled = false
+        default:
+            enabled = nil
+        }
+
+        guard let enabled else {
+            FileLogger.shared.log(
+                "state",
+                "Multipoint GS returned unknown value 0x\(String(format: "%02X", payload[3]))"
+            )
+            return
+        }
+
+        state.multipointEnabled = enabled
+
+        if state.pendingMultipointEnabled == enabled {
+            state.pendingMultipointEnabled = nil
+
+            FileLogger.shared.log(
+                "state",
+                "Multipoint change confirmed by headset"
+            )
+        }
+
+        FileLogger.shared.log(
+            "state",
+            "Multipoint = \(enabled ? "ON" : "OFF")"
+        )
+    }
+
+    private func parseConnectivityNotifyV2(_ payload: [UInt8]) {
+        // Table-2 PERI_NTFY_EXTENDED_PARAM:
+        //
+        // 3D 02 <action> <result> <17-byte ASCII MAC>
+        //
+        // action:
+        //   00 disconnect
+        //   01 connect
+        //
+        // results:
+        //   00-03 disconnect success/error/in-progress/busy
+        //   10-13 connect success/error/in-progress/busy
+        guard payload.count >= 21,
+              payload[0] == V2Opcode.sourceSwitchNotifyExtendedParam,
+              payload[1] == V2Opcode.pairingDeviceManagementInquiryType else {
+            return
+        }
+
+        let action = payload[2]
+        let result = payload[3]
+
+        let address = String(
+            bytes: payload[4..<21],
+            encoding: .ascii
+        ) ?? "<bad-address>"
+
+        let actionName: String
+        switch action {
+        case V2Opcode.connectivityDisconnect:
+            actionName = "disconnect"
+        case V2Opcode.connectivityConnect:
+            actionName = "connect"
+        default:
+            actionName = "action-0x\(String(format: "%02X", action))"
+        }
+
+        let resultDescription: String
+        switch result {
+        case 0x00: resultDescription = "success"
+        case 0x01: resultDescription = "error"
+        case 0x02: resultDescription = "in progress"
+        case 0x03: resultDescription = "busy"
+        case 0x10: resultDescription = "success"
+        case 0x11: resultDescription = "error"
+        case 0x12: resultDescription = "in progress"
+        case 0x13: resultDescription = "busy"
+        default:
+            resultDescription =
+                "unknown result 0x\(String(format: "%02X", result))"
+        }
+
+        let targetName = state.connectedDevices.first(where: {
+            $0.address.caseInsensitiveCompare(address) == .orderedSame
+        })?.name ?? address
+
+        FileLogger.shared.log(
+            "devices",
+            "multipoint \(actionName) \(resultDescription): \(targetName)"
+        )
+
+        if result == 0x00 || result == 0x10 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+                self?.sendConnectedDevicesGetV2()
+            }
         }
     }
 
@@ -1279,6 +1839,25 @@ final class HeadphonesController {
             "state",
             "GS v2 slot=\(String(format: "0x%02X", slot)) name='\(name)'"
         )
+
+        if name == "MULTIPOINT_SETTING" {
+            let settingType = payload.count > 2 ? payload[2] : 0xFF
+
+            multipointGsSlot = slot
+            state.multipointToggleAvailable = settingType == 0x00
+
+            FileLogger.shared.log(
+                "features",
+                "→ Multipoint setting discovered at slot \(String(format: "0x%02X", slot)), boolean=\(settingType == 0x00)"
+            )
+
+            if settingType == 0x00 {
+                sendPayload(
+                    [0xD6, slot],
+                    label: "MULTIPOINT GET"
+                )
+            }
+        }
 
         if name == "TOUCH_PANEL_SETTING" {
             touchPanelSlot = slot
