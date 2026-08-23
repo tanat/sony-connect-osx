@@ -147,6 +147,7 @@ final class HeadphonesController {
         static let apoGet: UInt8 = 0x26          // 26 05        -> RET 27 05 <c0> <c1>
         static let apoRet: UInt8 = 0x27
         static let apoSet: UInt8 = 0x28          // 28 05 <c0> <c1>
+        static let apoNotify: UInt8 = 0x29       // 29 05 <c0> <c1>
         static let apoInquiredType: UInt8 = 0x05
         static let apoOff: (UInt8, UInt8) = (0x11, 0x00)
 
@@ -168,6 +169,7 @@ final class HeadphonesController {
         static let btnModeGet: UInt8 = 0xF6      // F6 <sub>     -> RET F7 <sub> ...
         static let btnModeRet: UInt8 = 0xF7
         static let btnModeSet: UInt8 = 0xF8      // F8 0C <0=on/1=off> 01
+        static let btnModeNotify: UInt8 = 0xF9   // F9 0C <0=on/1=off> 01
         static let subSpeakToChat: UInt8 = 0x0C
     }
 
@@ -848,9 +850,9 @@ final class HeadphonesController {
             parseBatteryV2(packet.payload)
         case V2Opcode.eqRet, V2Opcode.eqNotify:
             parseEqParamV2(packet.payload)
-        case V2Opcode.btnModeRet:
+        case V2Opcode.btnModeRet, V2Opcode.btnModeNotify:
             parseBtnModeV2(packet.payload)
-        case V2Opcode.apoRet:
+        case V2Opcode.apoRet, V2Opcode.apoNotify:
             parseAutoPowerOffV2(packet.payload)
         case Opcode.gsRetCapability:
             parseGsCapabilityV2(packet.payload)
