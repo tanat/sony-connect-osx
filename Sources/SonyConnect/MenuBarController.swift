@@ -52,6 +52,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let reconnectMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let reconnectButton = NSButton()
     private let launchAtLoginMenuItem = NSMenuItem(title: "Launch at Login", action: nil, keyEquivalent: "")
+    private let showBatteryMenuItem = NSMenuItem(title: "Show Battery in Menu Bar", action: nil, keyEquivalent: "")
     private let hideIconMenuItem = NSMenuItem(title: "Hide Icon When Disconnected", action: nil, keyEquivalent: "")
     private let openLogMenuItem = NSMenuItem(title: "Open Log…", action: nil, keyEquivalent: "")
     private let preferences = AppPreferences.shared
@@ -81,14 +82,70 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     // MARK: - Icon
 
     private func applyIcon() {
-        guard let image = NSImage(systemSymbolName: "airpodsmax",
-                                  accessibilityDescription: "SonyConnect") else {
-            statusItem.button?.title = "🎧"
-            return
+        guard let button = statusItem.button else { return }
+
+        if let image = NSImage(
+            systemSymbolName: "airpodsmax",
+            accessibilityDescription: "SonyConnect"
+        ) {
+            image.isTemplate = true
+            button.image = image
+            button.imagePosition = .imageLeading
+            button.imageScaling = .scaleProportionallyDown
+            button.title = ""
+        } else {
+            button.image = nil
+            button.title = "🎧"
         }
-        image.isTemplate = true
-        statusItem.button?.image = image
-        statusItem.button?.title = ""
+    }
+
+    private func updateStatusItemAppearance(state: HeadphonesController.State) {
+        guard let button = statusItem.button else { return }
+
+        let batteryText: String?
+        if preferences.showBatteryInMenuBar,
+           state.deviceReachable,
+           let level = state.batteryLevel {
+            batteryText = "\(level)%"
+        } else {
+            batteryText = nil
+        }
+
+        if let image = NSImage(
+            systemSymbolName: "airpodsmax",
+            accessibilityDescription: "SonyConnect"
+        ) {
+            image.isTemplate = true
+            button.image = image
+            button.imageScaling = .scaleProportionallyDown
+
+            if let batteryText {
+                // Icon + percentage needs a variable-width status item.
+                button.imagePosition = .imageLeading
+                button.title = " \(batteryText)"
+                statusItem.length = NSStatusItem.variableLength
+            } else {
+                // Do not use imageLeading with an empty title. Keep the
+                // ordinary disconnected/idle presentation as a square icon.
+                button.imagePosition = .imageOnly
+                button.title = ""
+                statusItem.length = NSStatusItem.squareLength
+            }
+        } else {
+            button.image = nil
+            button.imagePosition = .noImage
+
+            if let batteryText {
+                button.title = "🎧 \(batteryText)"
+                statusItem.length = NSStatusItem.variableLength
+            } else {
+                button.title = "🎧"
+                statusItem.length = NSStatusItem.squareLength
+            }
+        }
+
+        // Visibility is still controlled separately by the user's
+        // Hide Icon When Disconnected preference.
     }
 
     // MARK: - Setup
@@ -220,6 +277,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             action: #selector(reconnectButtonPressed(_:))
         )
         popupMenu.addItem(reconnectMenuItem)
+
+        showBatteryMenuItem.target = self
+        showBatteryMenuItem.action = #selector(toggleShowBatteryInMenuBar)
+        popupMenu.addItem(showBatteryMenuItem)
 
         hideIconMenuItem.target = self
         hideIconMenuItem.action = #selector(toggleHideIcon)
@@ -496,7 +557,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         // HideIconWhenDisconnected -bool YES, or the toggle below): it looks
         // tidier, but while hidden the app is only reachable again by
         // reconnecting the headphones or flipping the default back.
+        showBatteryMenuItem.state = preferences.showBatteryInMenuBar ? .on : .off
         hideIconMenuItem.state = preferences.hideIconWhenDisconnected ? .on : .off
+
+        updateStatusItemAppearance(state: state)
         if preferences.hideIconWhenDisconnected {
             // Keep the item visible until the user has had a chance to open
             // the menu and turn this preference off after relaunch.
@@ -802,6 +866,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     @objc private func reconnectButtonPressed(_ sender: NSButton) {
         controller.connect()
+    }
+
+    @objc private func toggleShowBatteryInMenuBar() {
+        preferences.showBatteryInMenuBar.toggle()
+        render(state: controller.state)
     }
 
     @objc private func toggleHideIcon() {
