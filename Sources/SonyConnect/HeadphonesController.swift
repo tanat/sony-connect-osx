@@ -238,6 +238,7 @@ final class HeadphonesController {
     var autoOffOption: AutoPowerOffOption {
         get { autoOff.option }
         set {
+            policy.userActivity()
             autoOff.option = newValue
             // v2 keeps its own timer, so hand the setting over and let the
             // Mac-side countdown stay idle.
@@ -282,6 +283,14 @@ final class HeadphonesController {
         policy.userActivity()
     }
 
+    func menuOpened() {
+        policy.menuOpened()
+    }
+
+    func menuClosed() {
+        policy.menuClosed()
+    }
+
     private func resetSessionState() {
         initialized = false
         awaitingInitResponse = false
@@ -295,6 +304,7 @@ final class HeadphonesController {
     }
 
     func toggleTouchSensor() {
+        policy.userActivity()
         guard initialized else {
             FileLogger.shared.log("cmd", "toggle ignored: not initialized")
             return
@@ -316,6 +326,7 @@ final class HeadphonesController {
     }
 
     func setNCMode(_ mode: NCMode) {
+        policy.userActivity()
         guard initialized else { return }
         sendNcasmSet(mode: mode)
         state.ncMode = mode
@@ -325,6 +336,7 @@ final class HeadphonesController {
     }
 
     func setAmbientLevel(_ level: Int) {
+        policy.userActivity()
         guard initialized else { return }
         let clamped = UInt8(clamping: min(max(level, 0), Int(Self.maxAmbientLevel)))
         currentAmbientLevel = clamped
@@ -337,6 +349,7 @@ final class HeadphonesController {
     }
 
     func setAmbientFocusOnVoice(_ enabled: Bool) {
+        policy.userActivity()
         guard initialized else { return }
         asmId = enabled ? 0x01 : 0x00
         state.ambientFocusOnVoice = enabled
@@ -348,6 +361,7 @@ final class HeadphonesController {
     }
 
     func toggleSpeakToChat() {
+        policy.userActivity()
         guard initialized else { return }
         let next = !(state.speakToChatEnabled ?? false)
         sendSpeakToChat(enabled: next)
@@ -358,6 +372,7 @@ final class HeadphonesController {
     }
 
     func setEqPreset(_ id: UInt8) {
+        policy.userActivity()
         guard initialized else { return }
         let setOpcode = isV2 ? V2Opcode.eqSet : Opcode.eqSetParam
         let inquiredType = isV2 ? V2Opcode.eqInquiredType : Opcode.eqPresetInquiredType
@@ -371,6 +386,7 @@ final class HeadphonesController {
     }
 
     func setEqBands(_ bands: [Int]) {
+        policy.userActivity()
         guard initialized, !bands.isEmpty else { return }
         // Custom band values must be sent under preset id UNSPECIFIED (0xFF),
         // not CUSTOM (0xA0). 0xA0 is a volatile preview the device drops on

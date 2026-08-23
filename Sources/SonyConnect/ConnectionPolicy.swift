@@ -22,6 +22,7 @@ final class ConnectionPolicy {
     private var timer: Timer?
     private var lastActiveDate = Date()
     private var currentlyConnected = false
+    private var menuIsOpen = false
 
     func start() {
         guard timer == nil else { return }
@@ -59,8 +60,28 @@ final class ConnectionPolicy {
         }
     }
 
+    func menuOpened() {
+        menuIsOpen = true
+        lastActiveDate = Date()
+        FileLogger.shared.log("policy", "menu opened")
+
+        if !currentlyConnected {
+            FileLogger.shared.log("policy", "menu open → request connect")
+            onShouldConnect?()
+        }
+    }
+
+    func menuClosed() {
+        menuIsOpen = false
+        lastActiveDate = Date()
+        FileLogger.shared.log(
+            "policy",
+            "menu closed; release grace=\(Int(Self.idleThreshold))s"
+        )
+    }
+
     private func tick() {
-        guard currentlyConnected else { return }
+        guard currentlyConnected, !menuIsOpen else { return }
 
         let idle = Date().timeIntervalSince(lastActiveDate)
 

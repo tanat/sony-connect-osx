@@ -17,19 +17,29 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private var eqSubmenuBuilt = false
     private let eqBandsMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let eqView = EqualizerView()
-    private let touchMenuItem = NSMenuItem(title: "Touch Sensor: —", action: nil, keyEquivalent: "")
+    private let touchMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let touchButton = NSButton()
+
     private let ncParentMenuItem = NSMenuItem(title: "Noise Cancelling: —", action: nil, keyEquivalent: "")
-    private let ncOnItem = NSMenuItem(title: "Noise Cancelling", action: nil, keyEquivalent: "")
-    private let ncAmbientItem = NSMenuItem(title: "Ambient Sound", action: nil, keyEquivalent: "")
-    private let ncOffItem = NSMenuItem(title: "Off", action: nil, keyEquivalent: "")
+    private let ncOnItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let ncAmbientItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let ncOffItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let ncOnButton = NSButton()
+    private let ncAmbientButton = NSButton()
+    private let ncOffButton = NSButton()
     private let ambientSettingsMenuItem = NSMenuItem(title: "Ambient Sound Settings", action: nil, keyEquivalent: "")
     private let ambientSettingsSubmenu = NSMenu(title: "Ambient Sound Settings")
     private let ambientLevelMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let ambientLevelSlider = ScrollableSlider()
-    private let focusOnVoiceMenuItem = NSMenuItem(title: "Focus on Voice", action: nil, keyEquivalent: "")
-    private let speakToChatMenuItem = NSMenuItem(title: "Speak-to-Chat: —", action: nil, keyEquivalent: "")
+    private let focusOnVoiceMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let focusOnVoiceButton = NSButton()
+
+    private let speakToChatMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let speakToChatButton = NSButton()
+
     private let autoOffMenuItem = NSMenuItem(title: "Auto Power Off", action: nil, keyEquivalent: "")
     private let autoOffSubmenu = NSMenu(title: "Auto Power Off")
+    private var autoOffButtons: [Int: NSButton] = [:]
     private let powerOffMenuItem = NSMenuItem(title: "Power Off Headphones", action: nil, keyEquivalent: "")
     private let reconnectMenuItem = NSMenuItem(title: "Reconnect", action: nil, keyEquivalent: "r")
     private let hideIconMenuItem = NSMenuItem(title: "Hide Icon When Disconnected", action: nil, keyEquivalent: "")
@@ -109,24 +119,60 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
         popupMenu.addItem(.separator())
 
-        touchMenuItem.target = self
-        touchMenuItem.action = #selector(toggleTouchSensor)
+        configurePersistentButton(
+            touchButton,
+            in: touchMenuItem,
+            title: "Touch Sensor",
+            type: .switch,
+            action: #selector(toggleTouchSensorButton(_:))
+        )
         popupMenu.addItem(touchMenuItem)
 
-        // Noise Cancelling submenu (three radio-style options)
+        // Noise Cancelling submenu. Custom radio-button views keep the
+        // submenu open while modes are changed.
         let ncSubmenu = NSMenu(title: "Noise Cancelling")
-        for (item, tag) in [(ncOnItem, 0), (ncAmbientItem, 1), (ncOffItem, 2)] {
-            item.target = self
-            item.action = #selector(setNCFromMenu(_:))
-            item.tag = tag
-            ncSubmenu.addItem(item)
-        }
+
+        configurePersistentButton(
+            ncOnButton,
+            in: ncOnItem,
+            title: "Noise Cancelling",
+            type: .radio,
+            action: #selector(setNCFromButton(_:)),
+            tag: 0
+        )
+
+        configurePersistentButton(
+            ncAmbientButton,
+            in: ncAmbientItem,
+            title: "Ambient Sound",
+            type: .radio,
+            action: #selector(setNCFromButton(_:)),
+            tag: 1
+        )
+
+        configurePersistentButton(
+            ncOffButton,
+            in: ncOffItem,
+            title: "Off",
+            type: .radio,
+            action: #selector(setNCFromButton(_:)),
+            tag: 2
+        )
+
+        ncSubmenu.addItem(ncOnItem)
+        ncSubmenu.addItem(ncAmbientItem)
+        ncSubmenu.addItem(ncOffItem)
         ncSubmenu.addItem(.separator())
         configureAmbientLevelItem()
         ambientSettingsSubmenu.addItem(ambientLevelMenuItem)
         ambientSettingsSubmenu.addItem(.separator())
-        focusOnVoiceMenuItem.target = self
-        focusOnVoiceMenuItem.action = #selector(toggleFocusOnVoice)
+        configurePersistentButton(
+            focusOnVoiceButton,
+            in: focusOnVoiceMenuItem,
+            title: "Focus on Voice",
+            type: .switch,
+            action: #selector(toggleFocusOnVoiceButton(_:))
+        )
         ambientSettingsSubmenu.addItem(focusOnVoiceMenuItem)
         ambientSettingsMenuItem.submenu = ambientSettingsSubmenu
         ncSubmenu.addItem(ambientSettingsMenuItem)
@@ -134,8 +180,13 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         ncParentMenuItem.submenu = ncSubmenu
         popupMenu.addItem(ncParentMenuItem)
 
-        speakToChatMenuItem.target = self
-        speakToChatMenuItem.action = #selector(toggleSpeakToChat)
+        configurePersistentButton(
+            speakToChatButton,
+            in: speakToChatMenuItem,
+            title: "Speak-to-Chat",
+            type: .switch,
+            action: #selector(toggleSpeakToChatButton(_:))
+        )
         popupMenu.addItem(speakToChatMenuItem)
 
         popupMenu.addItem(.separator())
@@ -165,6 +216,38 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         popupMenu.addItem(NSMenuItem(title: "Quit SonyConnect",
                                      action: #selector(NSApplication.terminate(_:)),
                                      keyEquivalent: "q"))
+    }
+
+    private func configurePersistentButton(
+        _ button: NSButton,
+        in menuItem: NSMenuItem,
+        title: String,
+        type: NSButton.ButtonType,
+        action: Selector,
+        tag: Int = 0
+    ) {
+        let width: CGFloat = 230
+        let height: CGFloat = 24
+
+        let container = NSView(
+            frame: NSRect(x: 0, y: 0, width: width, height: height)
+        )
+        container.autoresizingMask = [.width]
+
+        button.frame = NSRect(x: 12, y: 1, width: width - 24, height: 22)
+        button.autoresizingMask = [.width]
+        button.title = title
+        button.setButtonType(type)
+        button.bezelStyle = .regularSquare
+        button.isBordered = false
+        button.alignment = .left
+        button.font = .menuFont(ofSize: 0)
+        button.target = self
+        button.action = action
+        button.tag = tag
+
+        container.addSubview(button)
+        menuItem.view = container
     }
 
     private func configureVolumeItem() {
@@ -254,10 +337,6 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         controller.setAmbientLevel(sender.integerValue)
     }
 
-    @objc private func toggleFocusOnVoice() {
-        controller.setAmbientFocusOnVoice(focusOnVoiceMenuItem.state != .on)
-    }
-
     private func refreshVolumeItem(reachable: Bool) {
         if reachable, let vol = volumeController.currentVolume() {
             volumeSlider.floatValue = vol
@@ -279,17 +358,20 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     func menuWillOpen(_ menu: NSMenu) {
-        // Counts as user activity — wakes the RFCOMM channel if the
-        // policy had idle-disconnected it.
-        controller.userActivity()
+        // Keep the Sony control channel alive for the entire time the
+        // user is interacting with the menu.
+        controller.menuOpened()
+
         // Pull the live output volume right before the menu is shown.
         refreshVolumeItem(reachable: controller.state.deviceReachable)
     }
 
     func menuDidClose(_ menu: NSMenu) {
+        // Start the RFCOMM release grace period only after the menu closes.
+        controller.menuClosed()
+
         // Detach the menu so the next click is routed through our action
-        // handler again (otherwise NSStatusItem auto-shows the menu on
-        // every click).
+        // handler again.
         DispatchQueue.main.async { [weak self] in
             self?.statusItem.menu = nil
         }
@@ -348,33 +430,33 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         // return so the rows reappear once a v1 device connects.
 
         if !state.isConnected {
-            touchMenuItem.title = "Touch Sensor: —"
-            touchMenuItem.state = .off
-            touchMenuItem.isEnabled = false
+            touchButton.title = "Touch Sensor"
+            touchButton.state = .off
+            touchButton.isEnabled = false
             ncParentMenuItem.title = "Noise Cancelling: —"
             ncParentMenuItem.isEnabled = false
             ambientSettingsMenuItem.isEnabled = false
-            focusOnVoiceMenuItem.isEnabled = false
-            speakToChatMenuItem.title = "Speak-to-Chat: —"
-            speakToChatMenuItem.state = .off
-            speakToChatMenuItem.isEnabled = false
+            focusOnVoiceButton.isEnabled = false
+            speakToChatButton.title = "Speak-to-Chat"
+            speakToChatButton.state = .off
+            speakToChatButton.isEnabled = false
             powerOffMenuItem.isEnabled = false
             return
         }
         // Touch sensor row
         switch state.touchSensorEnabled {
         case .some(true):
-            touchMenuItem.title = "Touch Sensor: ON"
-            touchMenuItem.state = .on
-            touchMenuItem.isEnabled = true
+            touchButton.title = "Touch Sensor"
+            touchButton.state = .on
+            touchButton.isEnabled = true
         case .some(false):
-            touchMenuItem.title = "Touch Sensor: OFF"
-            touchMenuItem.state = .off
-            touchMenuItem.isEnabled = true
+            touchButton.title = "Touch Sensor"
+            touchButton.state = .off
+            touchButton.isEnabled = true
         case .none:
-            touchMenuItem.title = "Touch Sensor: …"
-            touchMenuItem.state = .off
-            touchMenuItem.isEnabled = false
+            touchButton.title = "Touch Sensor"
+            touchButton.state = .off
+            touchButton.isEnabled = false
         }
 
         // Noise Cancelling submenu
@@ -387,51 +469,59 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         case .none: ncLabel = "…"
         }
         ncParentMenuItem.title = "Noise Cancelling: \(ncLabel)"
-        ncOnItem.state = state.ncMode == .noiseCancelling ? .on : .off
-        ncAmbientItem.state = state.ncMode == .ambient ? .on : .off
-        ncOffItem.state = state.ncMode == .off ? .on : .off
+        ncOnButton.state = state.ncMode == .noiseCancelling ? .on : .off
+        ncAmbientButton.state = state.ncMode == .ambient ? .on : .off
+        ncOffButton.state = state.ncMode == .off ? .on : .off
 
         // Ambient Sound settings (level slider + Focus on Voice) only make
         // sense while Ambient mode is actually active on the device.
         let ambientActive = state.ncMode == .ambient
         ambientSettingsMenuItem.isEnabled = ambientActive
         ambientLevelSlider.integerValue = state.ambientLevel
-        focusOnVoiceMenuItem.isEnabled = ambientActive
-        focusOnVoiceMenuItem.state = state.ambientFocusOnVoice ? .on : .off
+        focusOnVoiceButton.isEnabled = ambientActive
+        focusOnVoiceButton.state = state.ambientFocusOnVoice ? .on : .off
 
         // Speak-to-Chat
-        speakToChatMenuItem.isEnabled = state.speakToChatEnabled != nil
+        speakToChatButton.isEnabled = state.speakToChatEnabled != nil
+        speakToChatButton.title = "Speak-to-Chat"
+
         switch state.speakToChatEnabled {
         case .some(true):
-            speakToChatMenuItem.title = "Speak-to-Chat: ON"
-            speakToChatMenuItem.state = .on
+            speakToChatButton.state = .on
         case .some(false):
-            speakToChatMenuItem.title = "Speak-to-Chat: OFF"
-            speakToChatMenuItem.state = .off
+            speakToChatButton.state = .off
         case .none:
-            speakToChatMenuItem.title = "Speak-to-Chat: …"
-            speakToChatMenuItem.state = .off
+            speakToChatButton.state = .off
         }
     }
 
     // MARK: - Menu actions
 
-    @objc private func toggleTouchSensor() {
+    @objc private func toggleTouchSensorButton(_ sender: NSButton) {
         controller.toggleTouchSensor()
     }
 
-    @objc private func setNCFromMenu(_ sender: NSMenuItem) {
+    @objc private func setNCFromButton(_ sender: NSButton) {
         let mode: HeadphonesController.NCMode
+
         switch sender.tag {
-        case 0: mode = .noiseCancelling
-        case 1: mode = .ambient
-        default: mode = .off
+        case 0:
+            mode = .noiseCancelling
+        case 1:
+            mode = .ambient
+        default:
+            mode = .off
         }
+
         controller.setNCMode(mode)
     }
 
-    @objc private func toggleSpeakToChat() {
+    @objc private func toggleSpeakToChatButton(_ sender: NSButton) {
         controller.toggleSpeakToChat()
+    }
+
+    @objc private func toggleFocusOnVoiceButton(_ sender: NSButton) {
+        controller.setAmbientFocusOnVoice(sender.state == .on)
     }
 
     private func updateEqSubmenu(presets: [HeadphonesController.EqPreset], current: UInt8?) {
@@ -454,24 +544,36 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         )
         if autoOffSubmenu.items.count != options.count {
             autoOffSubmenu.removeAllItems()
+            autoOffButtons.removeAll()
+
             for option in options {
-                let item = NSMenuItem(title: option.title,
-                                      action: #selector(setAutoOffFromMenu(_:)),
-                                      keyEquivalent: "")
-                item.target = self
-                item.tag = option.rawValue
+                let item = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+                let button = NSButton()
+
+                configurePersistentButton(
+                    button,
+                    in: item,
+                    title: option.title,
+                    type: .radio,
+                    action: #selector(setAutoOffFromButton(_:)),
+                    tag: option.rawValue
+                )
+
+                autoOffButtons[option.rawValue] = button
                 autoOffSubmenu.addItem(item)
             }
         }
-        for item in autoOffSubmenu.items {
-            item.state = item.tag == state.autoOffOption.rawValue ? .on : .off
+
+        for option in options {
+            autoOffButtons[option.rawValue]?.state =
+                option == state.autoOffOption ? .on : .off
         }
         autoOffMenuItem.title = state.autoOffOption == .off
             ? "Auto Power Off: Off"
             : "Auto Power Off: \(state.autoOffOption.title)"
     }
 
-    @objc private func setAutoOffFromMenu(_ sender: NSMenuItem) {
+    @objc private func setAutoOffFromButton(_ sender: NSButton) {
         guard let option = AutoPowerOffOption(rawValue: sender.tag) else { return }
         controller.autoOffOption = option
     }
