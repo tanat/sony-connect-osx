@@ -759,17 +759,11 @@ final class HeadphonesController {
             autoOff.disarm()
             policy.setCurrentlyConnected(false)
             state.isConnected = false
-            state.touchSensorEnabled = nil
-            state.ncMode = nil
-            state.speakToChatEnabled = nil
-            state.batteryLevel = nil
-            state.batteryCharging = false
-            state.eqPresets = []
-            state.eqCurrentPresetId = nil
-            state.eqBands = []
-            // Keep the last XM6 device list across an intentional RFCOMM
-            // release. Opcode 0x39 is event-driven and is not guaranteed to
-            // be retransmitted every time the control channel is reopened.
+            state.connectedDevicesAreLive = false
+            // Preserve the most recently reported headphone state. Closing the
+            // RFCOMM control channel does not mean these values vanished; they
+            // simply become stale until the next Sony control session refreshes
+            // them. UI controls remain disabled while state.isConnected is false.
             // Device may still be present (we just closed SPP for battery
             // saving) — reflect that instead of a flat "Disconnected".
             state.statusDescription = state.deviceReachable ? "\(deviceName) (idle)" : "Disconnected"
@@ -807,17 +801,11 @@ final class HeadphonesController {
             autoOff.disarm()
             policy.setCurrentlyConnected(false)
             state.isConnected = false
-            state.touchSensorEnabled = nil
-            state.ncMode = nil
-            state.speakToChatEnabled = nil
-            state.batteryLevel = nil
-            state.batteryCharging = false
-            state.eqPresets = []
-            state.eqCurrentPresetId = nil
-            state.eqBands = []
-            // Keep the last XM6 device list across an intentional RFCOMM
-            // release. Opcode 0x39 is event-driven and is not guaranteed to
-            // be retransmitted every time the control channel is reopened.
+            state.connectedDevicesAreLive = false
+            // Preserve the most recently reported headphone state. Closing the
+            // RFCOMM control channel does not mean these values vanished; they
+            // simply become stale until the next Sony control session refreshes
+            // them. UI controls remain disabled while state.isConnected is false.
             state.statusDescription = state.deviceReachable ? "\(deviceName) (idle)" : "Disconnected"
         }
     }

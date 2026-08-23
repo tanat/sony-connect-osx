@@ -132,15 +132,45 @@ final class BluetoothClient: NSObject {
 
     @objc private func aclDeviceConnected(_ notification: IOBluetoothUserNotification, device: IOBluetoothDevice) {
         guard isTargetDevice(device) else { return }
+
         FileLogger.shared.log("bt", "ACL connected: \(device.name ?? "?")")
         registerDisconnect(for: device)
         onReachabilityChange?(true, device.name)
+
+        // If an RFCOMM attempt died because the headphones temporarily
+        // disappeared, retry immediately when the base Bluetooth link returns.
+        // An intentional idle release keeps suppressAutoReconnect set, so this
+        // does not reopen the Sony control channel behind the user's back.
+        guard !suppressAutoReconnect else { return }
+
+        switch status {
+        case .disconnected, .failed:
+            FileLogger.shared.log("bt", "ACL restored → retry RFCOMM")
+            connect()
+        case .searching, .connecting, .connected:
+            break
+        }
     }
 
     @objc private func aclDeviceDisconnected(_ notification: IOBluetoothUserNotification, device: IOBluetoothDevice) {
         guard isTargetDevice(device) else { return }
+
         FileLogger.shared.log("bt", "ACL disconnected: \(device.name ?? "?")")
         onReachabilityChange?(false, device.name)
+
+        // An ACL loss invalidates every RFCOMM state, including an asynchronous
+        // channel open that has not completed yet. Without this transition the
+        // client can remain stuck in .connecting forever, causing connect() to
+        // reject every later retry.
+        channel = nil
+        self.device = nil
+
+        switch status {
+        case .disconnected:
+            break
+        case .searching, .connecting, .connected, .failed:
+            status = .disconnected
+        }
     }
 
     func setAutoReconnectEnabled(_ enabled: Bool) {

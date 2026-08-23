@@ -49,15 +49,15 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let autoOffSubmenu = NSMenu(title: "Auto Power Off")
     private var autoOffButtons: [Int: NSButton] = [:]
     private let powerOffMenuItem = NSMenuItem(title: "Power Off Headphones", action: nil, keyEquivalent: "")
-    private let reconnectMenuItem = NSMenuItem(title: "Reconnect", action: nil, keyEquivalent: "r")
+    private let reconnectMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let reconnectButton = NSButton()
+    private let launchAtLoginMenuItem = NSMenuItem(title: "Launch at Login", action: nil, keyEquivalent: "")
     private let hideIconMenuItem = NSMenuItem(title: "Hide Icon When Disconnected", action: nil, keyEquivalent: "")
     private let openLogMenuItem = NSMenuItem(title: "Open Log…", action: nil, keyEquivalent: "")
-
-    private static let hideIconDefaultsKey = "HideIconWhenDisconnected"
-    private static var hideIconWhenDisconnected: Bool {
-        get { UserDefaults.standard.bool(forKey: hideIconDefaultsKey) }
-        set { UserDefaults.standard.set(newValue, forKey: hideIconDefaultsKey) }
-    }
+    private let preferences = AppPreferences.shared
+    private let launchAtLogin = LaunchAtLoginManager()
+    private var hasRestoredMenuAccess = true
+    private var recoveryHideWorkItem: DispatchWorkItem?
 
     override init() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -69,6 +69,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         super.init()
         configureStatusButton()
         configureMenu()
+        updateLaunchAtLoginMenuItem()
         controller.onStateChange = { [weak self] state in
             DispatchQueue.main.async { self?.render(state: state) }
         }
@@ -212,13 +213,21 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
         popupMenu.addItem(.separator())
 
-        reconnectMenuItem.target = self
-        reconnectMenuItem.action = #selector(reconnect)
+        configurePersistentActionButton(
+            reconnectButton,
+            in: reconnectMenuItem,
+            title: "Reconnect",
+            action: #selector(reconnectButtonPressed(_:))
+        )
         popupMenu.addItem(reconnectMenuItem)
 
         hideIconMenuItem.target = self
         hideIconMenuItem.action = #selector(toggleHideIcon)
         popupMenu.addItem(hideIconMenuItem)
+
+        launchAtLoginMenuItem.target = self
+        launchAtLoginMenuItem.action = #selector(toggleLaunchAtLogin)
+        popupMenu.addItem(launchAtLoginMenuItem)
 
         openLogMenuItem.target = self
         openLogMenuItem.action = #selector(openLog)
@@ -262,6 +271,43 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         menuItem.view = container
     }
 
+    private func configurePersistentActionButton(
+        _ button: NSButton,
+        in menuItem: NSMenuItem,
+        title: String,
+        action: Selector
+    ) {
+        let width: CGFloat = 230
+        let height: CGFloat = 24
+
+        let container = NSView(
+            frame: NSRect(x: 0, y: 0, width: width, height: height)
+        )
+        container.autoresizingMask = [.width]
+
+        // NSMenu already provides the outer menu inset for a custom item view.
+        // A small internal inset lines this title up with native menu rows.
+        button.frame = NSRect(
+            x: 12,
+            y: 1,
+            width: width - 24,
+            height: 22
+        )
+        button.autoresizingMask = [.width]
+        button.title = title
+        button.setButtonType(.momentaryPushIn)
+        button.bezelStyle = .regularSquare
+        button.isBordered = false
+        button.alignment = .left
+        button.font = .menuFont(ofSize: 0)
+        button.target = self
+        button.action = action
+        button.isEnabled = true
+
+        container.addSubview(button)
+        menuItem.view = container
+    }
+
     private func configureVolumeItem() {
         let width: CGFloat = 230
         let height: CGFloat = 26
@@ -291,7 +337,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         container.addSubview(volumeSlider)
 
         volumeMenuItem.view = container
-        volumeMenuItem.isHidden = true
+        volumeMenuItem.isHidden = false
+        volumeSlider.isEnabled = false
     }
 
     @objc private func volumeChanged(_ sender: NSSlider) {
@@ -350,12 +397,13 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     private func refreshVolumeItem(reachable: Bool) {
-        if reachable, let vol = volumeController.currentVolume() {
-            volumeSlider.floatValue = vol
-            volumeMenuItem.isHidden = false
-        } else {
-            volumeMenuItem.isHidden = true
+        guard reachable, let vol = volumeController.currentVolume() else {
+            volumeSlider.isEnabled = false
+            return
         }
+
+        volumeSlider.floatValue = vol
+        volumeSlider.isEnabled = true
     }
 
     // MARK: - Click routing
@@ -369,7 +417,26 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         statusItem.button?.performClick(nil)
     }
 
+    func revealForRecovery() {
+        guard preferences.hideIconWhenDisconnected,
+              !controller.state.deviceReachable else { return }
+
+        recoveryHideWorkItem?.cancel()
+        hasRestoredMenuAccess = true
+        render(state: controller.state)
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self, self.statusItem.menu !== self.popupMenu else { return }
+            self.hasRestoredMenuAccess = false
+            self.render(state: self.controller.state)
+        }
+        recoveryHideWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15, execute: workItem)
+    }
+
     func menuWillOpen(_ menu: NSMenu) {
+        hasRestoredMenuAccess = true
+        updateLaunchAtLoginMenuItem()
         // Keep the Sony control channel alive for the entire time the
         // user is interacting with the menu.
         controller.menuOpened()
@@ -382,6 +449,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         // Start the RFCOMM release grace period only after the menu closes.
         controller.menuClosed()
 
+        if preferences.hideIconWhenDisconnected && !controller.state.deviceReachable {
+            hasRestoredMenuAccess = false
+            render(state: controller.state)
+        }
+
         // Detach the menu so the next click is routed through our action
         // handler again.
         DispatchQueue.main.async { [weak self] in
@@ -391,8 +463,31 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     // MARK: - State → UI
 
+    private func refreshOpenMenuUI() {
+        guard statusItem.menu === popupMenu else { return }
+
+        // AppKit's menu tracking loop does not always repaint items whose
+        // state changes asynchronously while the menu is already open.
+        // Force both native menu items and custom-view rows to refresh.
+        popupMenu.update()
+
+        for item in popupMenu.items {
+            if let view = item.view {
+                view.needsLayout = true
+                view.needsDisplay = true
+                view.layoutSubtreeIfNeeded()
+                view.displayIfNeeded()
+            }
+
+            item.submenu?.update()
+        }
+    }
+
     private func render(state: HeadphonesController.State) {
+        defer { refreshOpenMenuUI() }
         statusMenuItem.title = state.statusDescription
+        reconnectMenuItem.isHidden = state.isConnected
+        reconnectButton.isEnabled = true
         updateAutoOffSubmenu(state: state)
 
         // Default: the icon stays put and dims while the headphones are
@@ -401,9 +496,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         // HideIconWhenDisconnected -bool YES, or the toggle below): it looks
         // tidier, but while hidden the app is only reachable again by
         // reconnecting the headphones or flipping the default back.
-        hideIconMenuItem.state = Self.hideIconWhenDisconnected ? .on : .off
-        if Self.hideIconWhenDisconnected {
-            statusItem.isVisible = state.deviceReachable
+        hideIconMenuItem.state = preferences.hideIconWhenDisconnected ? .on : .off
+        if preferences.hideIconWhenDisconnected {
+            // Keep the item visible until the user has had a chance to open
+            // the menu and turn this preference off after relaunch.
+            statusItem.isVisible = state.deviceReachable || hasRestoredMenuAccess
             statusItem.button?.appearsDisabled = false
         } else {
             statusItem.isVisible = true
@@ -411,26 +508,27 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         }
 
         if let level = state.batteryLevel {
-            let suffix = state.batteryCharging ? " (charging)" : ""
-            batteryMenuItem.title = "Battery: \(level)%\(suffix)"
+            let charging = state.batteryCharging ? " (charging)" : ""
+            let stale = state.isConnected ? "" : " (Last Known)"
+            batteryMenuItem.title = "Battery: \(level)%\(charging)\(stale)"
             batteryMenuItem.isHidden = false
         } else {
             batteryMenuItem.isHidden = true
         }
 
-        // Hide the volume slider when the headphones aren't reachable.
-        // (The live value is pulled in menuWillOpen so we don't fight a
-        // user mid-drag with a stray state update.)
-        if !state.deviceReachable {
-            volumeMenuItem.isHidden = true
-        }
+        // Volume is Mac-side CoreAudio state, not Sony protocol state.
+        // Refresh it whenever headphone reachability changes so an already-open
+        // menu becomes interactive immediately after the headphones reconnect.
+        refreshVolumeItem(reachable: state.deviceReachable)
 
-        // Equalizer (only once the device has reported its preset list)
-        if state.isConnected && !state.eqPresets.isEmpty {
+        // Retain the most recently reported EQ while RFCOMM is idle.
+        // Its submenu is informational only until a live control session exists.
+        if !state.eqPresets.isEmpty {
             updateEqSubmenu(presets: state.eqPresets, current: state.eqCurrentPresetId)
             let currentName = state.eqPresets.first { $0.id == state.eqCurrentPresetId }?.name ?? "—"
             eqPresetMenuItem.title = "Equalizer: \(currentName)"
             eqPresetMenuItem.isHidden = false
+            eqPresetMenuItem.isEnabled = state.isConnected
             eqView.setBands(state.eqBands)
         } else {
             eqPresetMenuItem.isHidden = true
@@ -444,16 +542,40 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         // return so the rows reappear once a v1 device connects.
 
         if !state.isConnected {
+            // Show cached Sony state, but never allow stale controls to send
+            // commands until a fresh RFCOMM session is initialized.
             touchButton.title = "Touch Sensor"
-            touchButton.state = .off
+            touchButton.state = state.touchSensorEnabled == true ? .on : .off
             touchButton.isEnabled = false
-            ncParentMenuItem.title = "Noise Cancelling: —"
-            ncParentMenuItem.isEnabled = false
+
+            let ncLabel: String
+            switch state.ncMode {
+            case .some(.noiseCancelling): ncLabel = "ON"
+            case .some(.ambient): ncLabel = "Ambient"
+            case .some(.off): ncLabel = "Off"
+            case .none: ncLabel = "—"
+            }
+            ncParentMenuItem.title = state.ncMode == nil
+                ? "Noise Cancelling: —"
+                : "Noise Cancelling: \(ncLabel)"
+            ncParentMenuItem.isEnabled = true
+
+            ncOnButton.state = state.ncMode == .noiseCancelling ? .on : .off
+            ncAmbientButton.state = state.ncMode == .ambient ? .on : .off
+            ncOffButton.state = state.ncMode == .off ? .on : .off
+            ncOnButton.isEnabled = false
+            ncAmbientButton.isEnabled = false
+            ncOffButton.isEnabled = false
+
             ambientSettingsMenuItem.isEnabled = false
+            ambientLevelSlider.integerValue = state.ambientLevel
+            focusOnVoiceButton.state = state.ambientFocusOnVoice ? .on : .off
             focusOnVoiceButton.isEnabled = false
+
             speakToChatButton.title = "Speak-to-Chat"
-            speakToChatButton.state = .off
+            speakToChatButton.state = state.speakToChatEnabled == true ? .on : .off
             speakToChatButton.isEnabled = false
+
             powerOffMenuItem.isEnabled = false
             return
         }
@@ -475,6 +597,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
         // Noise Cancelling submenu
         ncParentMenuItem.isEnabled = true
+        ncOnButton.isEnabled = true
+        ncAmbientButton.isEnabled = true
+        ncOffButton.isEnabled = true
+
         let ncLabel: String
         switch state.ncMode {
         case .some(.noiseCancelling): ncLabel = "ON"
@@ -521,7 +647,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         // Before a fresh 0x39 arrives this process may only have the persisted
         // known-device cache. Do not present old connection slots as current.
         if !state.connectedDevicesAreLive {
-            multipointMenuItem.title = "Multipoint: Last Known"
+            multipointMenuItem.title = "Multipoint"
 
             let devices = state.connectedDevices.sorted {
                 $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
@@ -658,9 +784,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             autoOffButtons[option.rawValue]?.state =
                 option == state.autoOffOption ? .on : .off
         }
-        autoOffMenuItem.title = state.autoOffOption == .off
-            ? "Auto Power Off: Off"
-            : "Auto Power Off: \(state.autoOffOption.title)"
+        let autoOffValue = state.autoOffOption == .off
+            ? "Off"
+            : state.autoOffOption.title
+        autoOffMenuItem.title = "Auto Power Off: \(autoOffValue)"
+        autoOffMenuItem.isEnabled = state.isConnected
     }
 
     @objc private func setAutoOffFromButton(_ sender: NSButton) {
@@ -672,13 +800,45 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         controller.powerOff()
     }
 
-    @objc private func reconnect() {
+    @objc private func reconnectButtonPressed(_ sender: NSButton) {
         controller.connect()
     }
 
     @objc private func toggleHideIcon() {
-        Self.hideIconWhenDisconnected.toggle()
+        preferences.hideIconWhenDisconnected.toggle()
         render(state: controller.state)
+    }
+
+    @objc private func toggleLaunchAtLogin() {
+        let result = launchAtLogin.setEnabled(!launchAtLogin.isEnabled)
+        switch result {
+        case .changed:
+            updateLaunchAtLoginMenuItem()
+        case .unsupported:
+            showLaunchAtLoginAlert(
+                message: "Launch at Login requires macOS 13 or later."
+            )
+        case .failed(let error):
+            FileLogger.shared.log("login", "could not change registration: \(error.localizedDescription)")
+            showLaunchAtLoginAlert(
+                message: "SonyConnect could not change its Launch at Login setting.\n\n\(error.localizedDescription)"
+            )
+        }
+    }
+
+    private func updateLaunchAtLoginMenuItem() {
+        launchAtLoginMenuItem.state = launchAtLogin.isEnabled ? .on : .off
+        launchAtLoginMenuItem.isEnabled = launchAtLogin.isSupported
+    }
+
+    private func showLaunchAtLoginAlert(message: String) {
+        let alert = NSAlert()
+        alert.messageText = "Launch at Login"
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+        updateLaunchAtLoginMenuItem()
     }
 
     @objc private func openLog() {
