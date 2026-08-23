@@ -24,6 +24,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         keyEquivalent: ""
     )
     private let multipointSubmenu = NSMenu(title: "Multipoint")
+    private var multipointButtons: [String: NSButton] = [:]
+    private var multipointLayoutSignature = ""
 
     private let touchMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let touchButton = NSButton()
@@ -702,11 +704,13 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private func updateMultipointSubmenu(state: HeadphonesController.State) {
         guard state.isWH1000XM6, !state.connectedDevices.isEmpty else {
             multipointMenuItem.isHidden = true
+            multipointLayoutSignature = ""
+            multipointButtons.removeAll()
+            multipointSubmenu.removeAllItems()
             return
         }
 
         multipointMenuItem.isHidden = false
-        multipointSubmenu.removeAllItems()
 
         func addHeader(_ title: String) {
             let item = NSMenuItem(title: "", action: nil, keyEquivalent: "")
@@ -744,19 +748,31 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         guard state.connectedDevicesAreLive else {
             multipointMenuItem.title = "Multipoint: Last Known"
 
-            addHeader("Known Devices")
-
-            for device in state.connectedDevices.sorted(by: {
+            let devices = state.connectedDevices.sorted {
                 $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
-            }) {
-                let item = NSMenuItem(
-                    title: device.name,
-                    action: nil,
-                    keyEquivalent: ""
-                )
-                item.isEnabled = false
-                item.toolTip = device.address
-                multipointSubmenu.addItem(item)
+            }
+
+            let signature = "cached|" + devices.map {
+                "\($0.address)|\($0.name)"
+            }.joined(separator: "|")
+
+            if signature != multipointLayoutSignature {
+                multipointLayoutSignature = signature
+                multipointButtons.removeAll()
+                multipointSubmenu.removeAllItems()
+
+                addHeader("Known Devices")
+
+                for device in devices {
+                    let item = NSMenuItem(
+                        title: device.name,
+                        action: nil,
+                        keyEquivalent: ""
+                    )
+                    item.isEnabled = false
+                    item.toolTip = device.address
+                    multipointSubmenu.addItem(item)
+                }
             }
 
             return
@@ -778,57 +794,103 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
         multipointMenuItem.title = "Multipoint: \(connected.count) Connected"
 
-        if !connected.isEmpty {
-            addHeader("Connected")
+        // Deliberately excludes playbackDeviceSlot. Switching playback should
+        // update the existing custom buttons rather than rebuild the menu.
+        let signature =
+            "live|" +
+            connected.map {
+                "C|\($0.address)|\($0.name)|\($0.connectionSlot ?? 0)"
+            }.joined(separator: "|") +
+            "||" +
+            disconnected.map {
+                "K|\($0.address)|\($0.name)"
+            }.joined(separator: "|")
 
-            for device in connected {
-                let isPlaybackDevice =
-                    device.connectionSlot == state.playbackDeviceSlot
+        if signature != multipointLayoutSignature {
+            multipointLayoutSignature = signature
+            multipointButtons.removeAll()
+            multipointSubmenu.removeAllItems()
 
-                let item = NSMenuItem(
-                    title: device.name,
-                    action: #selector(selectMultipointPlaybackDevice(_:)),
-                    keyEquivalent: ""
-                )
-                item.target = self
-                item.representedObject = device.address
-                item.state = isPlaybackDevice ? .on : .off
-                item.isEnabled = state.isConnected
-                item.toolTip = [
-                    device.address,
-                    device.connectionSlot.map { "Multipoint slot \($0)" },
-                    isPlaybackDevice ? "Current playback device" : nil
-                ]
-                .compactMap { $0 }
-                .joined(separator: " · ")
+            if !connected.isEmpty {
+                addHeader("Connected")
 
-                multipointSubmenu.addItem(item)
+                for device in connected {
+                    let item = NSMenuItem(
+                        title: "",
+                        action: nil,
+                        keyEquivalent: ""
+                    )
+
+                    let button = NSButton()
+
+                    configurePersistentButton(
+                        button,
+                        in: item,
+                        title: device.name,
+                        type: .switch,
+                        action: #selector(selectMultipointPlaybackDevice(_:))
+                    )
+
+                    // NSButton inherits NSView.identifier, which gives us a
+                    // stable way to associate the custom row with its MAC.
+                    button.identifier = NSUserInterfaceItemIdentifier(device.address)
+
+                    multipointButtons[device.address] = button
+                    multipointSubmenu.addItem(item)
+                }
+            }
+
+            if !connected.isEmpty && !disconnected.isEmpty {
+                multipointSubmenu.addItem(.separator())
+            }
+
+            if !disconnected.isEmpty {
+                addHeader("Known Devices")
+
+                for device in disconnected {
+                    let item = NSMenuItem(
+                        title: device.name,
+                        action: nil,
+                        keyEquivalent: ""
+                    )
+                    item.isEnabled = false
+                    item.toolTip = device.address
+                    multipointSubmenu.addItem(item)
+                }
             }
         }
 
-        if !connected.isEmpty && !disconnected.isEmpty {
-            multipointSubmenu.addItem(.separator())
-        }
-
-        if !disconnected.isEmpty {
-            addHeader("Known Devices")
-
-            for device in disconnected {
-                let item = NSMenuItem(
-                    title: device.name,
-                    action: nil,
-                    keyEquivalent: ""
-                )
-                item.isEnabled = false
-                item.toolTip = device.address
-                multipointSubmenu.addItem(item)
+        // Playback changes only touch these persistent controls. No menu
+        // items are removed, so AppKit can continue tracking the open submenu.
+        for device in connected {
+            guard let button = multipointButtons[device.address] else {
+                continue
             }
+
+            let isPlaybackDevice =
+                device.connectionSlot == state.playbackDeviceSlot
+
+            button.state = isPlaybackDevice ? .on : .off
+            button.isEnabled = state.isConnected
+            button.toolTip = [
+                device.address,
+                device.connectionSlot.map { "Multipoint slot \($0)" },
+                isPlaybackDevice ? "Current playback device" : nil
+            ]
+            .compactMap { $0 }
+            .joined(separator: " · ")
         }
     }
 
-    @objc private func selectMultipointPlaybackDevice(_ sender: NSMenuItem) {
-        guard let address = sender.representedObject as? String else { return }
+    @objc private func selectMultipointPlaybackDevice(_ sender: NSButton) {
+        guard let address = sender.identifier?.rawValue else { return }
+
         controller.switchMultipointPlayback(to: address)
+
+        // NSButton changes its own check state immediately when clicked.
+        // Restore the UI to the last confirmed XM6 state until 0x3D/0x39
+        // reports that the source switch actually succeeded.
+        updateMultipointSubmenu(state: controller.state)
     }
 
     // MARK: - Menu actions
