@@ -1,4 +1,5 @@
 import AppKit
+import UserNotifications
 
 final class MenuBarController: NSObject, NSMenuDelegate {
     private let statusItem: NSStatusItem
@@ -10,6 +11,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let volumeMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let volumeSlider = NSSlider()
     private let volumeController = VolumeController(nameHints: SupportedDevices.nameHints)
+    private var volumeRefreshTimer: Timer?
     private let eqPresetMenuItem = NSMenuItem(title: "Equalizer: —", action: nil, keyEquivalent: "")
     private let eqPresetSubmenu = NSMenu(title: "Equalizer")
     private let eqPresetListItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
@@ -17,40 +19,110 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private var eqSubmenuBuilt = false
     private let eqBandsMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let eqView = EqualizerView()
-    private let touchMenuItem = NSMenuItem(title: "Touch Sensor: —", action: nil, keyEquivalent: "")
+
+    private let multipointMenuItem = NSMenuItem(
+        title: "",
+        action: nil,
+        keyEquivalent: ""
+    )
+    private let multipointManagerView = MultipointMenuView()
+
+    private let touchMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let touchButton = NSButton()
+
     private let ncParentMenuItem = NSMenuItem(title: "Noise Cancelling: —", action: nil, keyEquivalent: "")
-    private let ncOnItem = NSMenuItem(title: "Noise Cancelling", action: nil, keyEquivalent: "")
-    private let ncAmbientItem = NSMenuItem(title: "Ambient Sound", action: nil, keyEquivalent: "")
-    private let ncOffItem = NSMenuItem(title: "Off", action: nil, keyEquivalent: "")
+    private let ncOnItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let ncAmbientItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let ncOffItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let ncOnButton = NSButton()
+    private let ncAmbientButton = NSButton()
+    private let ncOffButton = NSButton()
+    private let autoAmbientMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let autoAmbientButton = NSButton()
+    private let autoAmbientSensitivityMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let autoAmbientSensitivityButton = NSButton()
     private let ambientSettingsMenuItem = NSMenuItem(title: "Ambient Sound Settings", action: nil, keyEquivalent: "")
     private let ambientSettingsSubmenu = NSMenu(title: "Ambient Sound Settings")
     private let ambientLevelMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let ambientLevelSlider = ScrollableSlider()
-    private let focusOnVoiceMenuItem = NSMenuItem(title: "Focus on Voice", action: nil, keyEquivalent: "")
-    private let speakToChatMenuItem = NSMenuItem(title: "Speak-to-Chat: —", action: nil, keyEquivalent: "")
+    private let focusOnVoiceMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let focusOnVoiceButton = NSButton()
+
+    private let speakToChatMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let speakToChatSubmenu = NSMenu(title: "Speak-to-Chat")
+    private let speakToChatButton = NSButton()
+    private let speakSensitivityMenuItem = NSMenuItem(title: "Sensitivity: —", action: nil, keyEquivalent: "")
+    private let speakTimeoutMenuItem = NSMenuItem(title: "Resume after: —", action: nil, keyEquivalent: "")
+    private let speakSensitivityButton = NSButton()
+    private let speakTimeoutButton = NSButton()
+    private let speakParentMenuItem = NSMenuItem(title: "Speak-to-Chat", action: nil, keyEquivalent: "")
+
+    private let wearingMenuItem = NSMenuItem(title: "Wearing Detection", action: nil, keyEquivalent: "")
+    private let pauseWhenTakenOffMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let pauseWhenTakenOffButton = NSButton()
+
+    private let listeningModesMenuItem = NSMenuItem(title: "Listening Mode", action: nil, keyEquivalent: "")
+    private let listeningModesSubmenu = NSMenu(title: "Listening Mode")
+    private let listeningModeContentItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let standardListeningItem = NSMenuItem(title: "Standard", action: nil, keyEquivalent: "")
+    private let backgroundMusicListeningItem = NSMenuItem(title: "Background Music", action: nil, keyEquivalent: "")
+    private let cinemaListeningItem = NSMenuItem(title: "Cinema", action: nil, keyEquivalent: "")
+    private let bgmRoomSizeMenuItem = NSMenuItem(title: "Background Music Room", action: nil, keyEquivalent: "")
+    private let bgmRoomSizeSubmenu = NSMenu(title: "Background Music Room")
+    private let myRoomButton = NSButton()
+    private let livingRoomButton = NSButton()
+    private let cafeButton = NSButton()
+    private let listeningModeView = ListeningModeMenuView()
+
     private let autoOffMenuItem = NSMenuItem(title: "Auto Power Off", action: nil, keyEquivalent: "")
     private let autoOffSubmenu = NSMenu(title: "Auto Power Off")
+    private var autoOffButtons: [Int: NSButton] = [:]
     private let powerOffMenuItem = NSMenuItem(title: "Power Off Headphones", action: nil, keyEquivalent: "")
-    private let reconnectMenuItem = NSMenuItem(title: "Reconnect", action: nil, keyEquivalent: "r")
+    private let reconnectMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let reconnectButton = NSButton()
+    private let launchAtLoginMenuItem = NSMenuItem(title: "Launch at Login", action: nil, keyEquivalent: "")
+    private let showBatteryMenuItem = NSMenuItem(title: "Show Battery in Menu Bar", action: nil, keyEquivalent: "")
     private let hideIconMenuItem = NSMenuItem(title: "Hide Icon When Disconnected", action: nil, keyEquivalent: "")
     private let openLogMenuItem = NSMenuItem(title: "Open Log…", action: nil, keyEquivalent: "")
-
-    private static let hideIconDefaultsKey = "HideIconWhenDisconnected"
-    private static var hideIconWhenDisconnected: Bool {
-        get { UserDefaults.standard.bool(forKey: hideIconDefaultsKey) }
-        set { UserDefaults.standard.set(newValue, forKey: hideIconDefaultsKey) }
-    }
+    private let preferences = AppPreferences.shared
+    private let launchAtLogin = LaunchAtLoginManager()
+    private var hasRestoredMenuAccess = true
+    private var recoveryHideWorkItem: DispatchWorkItem?
+    private var noiseCancellingSubmenuIsOpen = false
+    private var lastBatteryLevel: Int?
+    private var lastBatteryCharging: Bool?
 
     override init() {
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        // Without an autosaveName, macOS doesn't remember a dragged position
-        // across the item disappearing and reappearing (isVisible toggling
-        // below) — it just re-inserts wherever. This keys the position to a
-        // stable name so a manual drag sticks across connect/disconnect.
-        statusItem.autosaveName = "SonyConnectStatusItem"
+        // Do not assign autosaveName here. On recent macOS versions,
+        // persisted status-item placement/visibility state can survive outside
+        // the application's ordinary defaults and leave an otherwise healthy
+        // status item invisible after relaunch/reinstall.
+        //
+        // Start with a compact variable-width item so macOS can place it
+        // beside the notch and other menu extras. The render path keeps this
+        // compact width for the icon-only state and expands it for battery text.
+        statusItem = NSStatusBar.system.statusItem(
+            withLength: NSStatusItem.variableLength
+        )
+
         super.init()
+
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert]) { granted, error in
+            if let error {
+                FileLogger.shared.log("notifications", "battery notification permission error: \(error.localizedDescription)")
+            } else {
+                FileLogger.shared.log("notifications", "battery notifications authorized=\(granted)")
+            }
+        }
+
+        // Establish a visible status item before any asynchronous Sony state
+        // arrives. User preference handling in render() may hide it later only
+        // when Hide Icon When Disconnected is actually enabled.
+        statusItem.isVisible = true
+
         configureStatusButton()
         configureMenu()
+        updateLaunchAtLoginMenuItem()
         controller.onStateChange = { [weak self] state in
             DispatchQueue.main.async { self?.render(state: state) }
         }
@@ -62,23 +134,84 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     // MARK: - Icon
 
     private func applyIcon() {
-        guard let image = NSImage(systemSymbolName: "airpodsmax",
-                                  accessibilityDescription: "SonyConnect") else {
-            statusItem.button?.title = "🎧"
-            return
+        guard let button = statusItem.button else { return }
+
+        if let image = NSImage(
+            systemSymbolName: "airpodsmax",
+            accessibilityDescription: "SonyConnect"
+        ) {
+            image.isTemplate = true
+            button.image = image
+            button.imagePosition = .imageLeading
+            button.imageScaling = .scaleProportionallyDown
+            button.title = ""
+        } else {
+            button.image = nil
+            button.title = "SC"
         }
-        image.isTemplate = true
-        statusItem.button?.image = image
-        statusItem.button?.title = ""
+    }
+
+    private func updateStatusItemAppearance(state: HeadphonesController.State) {
+        guard let button = statusItem.button else { return }
+
+        let batteryText: String?
+        if preferences.showBatteryInMenuBar,
+           state.deviceReachable,
+           let level = state.batteryLevel {
+            batteryText = "\(level)%"
+        } else {
+            batteryText = nil
+        }
+
+        if let image = NSImage(
+            systemSymbolName: "airpodsmax",
+            accessibilityDescription: "SonyConnect"
+        ) {
+            image.isTemplate = true
+            button.image = image
+            button.imageScaling = .scaleProportionallyDown
+
+            if let batteryText {
+                // Icon + percentage needs a variable-width status item.
+                button.imagePosition = .imageLeading
+                button.title = " \(batteryText)"
+                statusItem.length = NSStatusItem.variableLength
+            } else {
+                // Do not use imageLeading with an empty title. Keep the
+                // ordinary disconnected/idle presentation as a square icon.
+                button.imagePosition = .imageOnly
+                button.title = ""
+                statusItem.length = NSStatusItem.variableLength
+            }
+        } else {
+            button.image = nil
+            button.imagePosition = .noImage
+
+            if let batteryText {
+                button.title = "SC \(batteryText)"
+                statusItem.length = NSStatusItem.variableLength
+            } else {
+                button.title = "SC"
+                statusItem.length = NSStatusItem.variableLength
+            }
+        }
+
+        // Visibility is still controlled separately by the user's
+        // Hide Icon When Disconnected preference.
     }
 
     // MARK: - Setup
 
     private func configureStatusButton() {
         guard let button = statusItem.button else { return }
+
+        button.isHidden = false
+        button.alphaValue = 1.0
+        button.isEnabled = true
         button.target = self
         button.action = #selector(handleClick(_:))
         button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+
         applyIcon()
     }
 
@@ -107,36 +240,233 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         eqView.onBandsChanged = { [weak self] bands in self?.controller.setEqBands(bands) }
         eqBandsMenuItem.view = eqView
 
+        multipointMenuItem.view = multipointManagerView
+
+        multipointManagerView.onToggleMultipoint = {
+            [weak self] enabled in
+
+            guard let self else { return }
+
+            self.controller.setMultipointEnabled(enabled)
+            self.multipointManagerView.render(
+                state: self.controller.state
+            )
+        }
+
+        multipointManagerView.onPlayback = {
+            [weak self] address in
+
+            guard let self else { return }
+
+            self.controller.switchMultipointPlayback(
+                to: address
+            )
+
+            self.multipointManagerView.render(
+                state: self.controller.state
+            )
+        }
+
+        multipointManagerView.onConnect = {
+            [weak self] address in
+
+            guard let self else { return }
+
+            self.controller.setMultipointDeviceConnected(
+                true,
+                address: address
+            )
+
+            self.multipointManagerView.render(
+                state: self.controller.state
+            )
+        }
+
+        multipointManagerView.onDisconnect = {
+            [weak self] address in
+
+            guard let self else { return }
+
+            self.controller.setMultipointDeviceConnected(
+                false,
+                address: address
+            )
+
+            self.multipointManagerView.render(
+                state: self.controller.state
+            )
+        }
+
+        multipointManagerView.onSwap = {
+            [weak self] address in
+
+            guard let self else { return }
+
+            self.controller.swapInMultipointDevice(
+                address: address
+            )
+
+            self.multipointManagerView.render(
+                state: self.controller.state
+            )
+        }
+
+        multipointManagerView.onTogglePairing = {
+            [weak self] in
+
+            guard let self else { return }
+
+            self.controller.setPairingMode(
+                self.controller.state.pairingMode != true
+            )
+
+            self.multipointManagerView.render(
+                state: self.controller.state
+            )
+        }
+
+        multipointManagerView.onRefresh = {
+            [weak self] in
+
+            guard let self else { return }
+
+            self.controller.refreshMultipointManager()
+
+            self.multipointManagerView.render(
+                state: self.controller.state
+            )
+        }
+        multipointMenuItem.isHidden = true
+        popupMenu.addItem(multipointMenuItem)
+
         popupMenu.addItem(.separator())
 
-        touchMenuItem.target = self
-        touchMenuItem.action = #selector(toggleTouchSensor)
+        configurePersistentButton(
+            touchButton,
+            in: touchMenuItem,
+            title: "Touch Sensor",
+            type: .switch,
+            action: #selector(toggleTouchSensorButton(_:))
+        )
         popupMenu.addItem(touchMenuItem)
 
-        // Noise Cancelling submenu (three radio-style options)
+        // Noise Cancelling submenu. Custom radio-button views keep the
+        // submenu open while modes are changed.
         let ncSubmenu = NSMenu(title: "Noise Cancelling")
-        for (item, tag) in [(ncOnItem, 0), (ncAmbientItem, 1), (ncOffItem, 2)] {
-            item.target = self
-            item.action = #selector(setNCFromMenu(_:))
-            item.tag = tag
-            ncSubmenu.addItem(item)
-        }
-        ncSubmenu.addItem(.separator())
+        ncSubmenu.delegate = self
+
+        configurePersistentButton(
+            ncOnButton,
+            in: ncOnItem,
+            title: "Noise Cancelling",
+            type: .radio,
+            action: #selector(setNCFromButton(_:)),
+            tag: 0
+        )
+
+        configurePersistentButton(
+            ncAmbientButton,
+            in: ncAmbientItem,
+            title: "Ambient Sound",
+            type: .radio,
+            action: #selector(setNCFromButton(_:)),
+            tag: 1
+        )
+
+        configurePersistentButton(
+            ncOffButton,
+            in: ncOffItem,
+            title: "Off",
+            type: .radio,
+            action: #selector(setNCFromButton(_:)),
+            tag: 2
+        )
+
+        ncSubmenu.addItem(ncOnItem)
+        ncSubmenu.addItem(ncAmbientItem)
+        configurePersistentButton(
+            autoAmbientButton,
+            in: autoAmbientMenuItem,
+            title: "Auto Ambient Sound",
+            type: .switch,
+            action: #selector(toggleAutoAmbientButton(_:))
+        )
+        configurePersistentButton(
+            autoAmbientSensitivityButton,
+            in: autoAmbientSensitivityMenuItem,
+            title: "Sensitivity: Standard",
+            type: .momentaryPushIn,
+            action: #selector(cycleAutoAmbientSensitivity(_:)),
+            leftInset: 48
+        )
         configureAmbientLevelItem()
-        ambientSettingsSubmenu.addItem(ambientLevelMenuItem)
-        ambientSettingsSubmenu.addItem(.separator())
-        focusOnVoiceMenuItem.target = self
-        focusOnVoiceMenuItem.action = #selector(toggleFocusOnVoice)
-        ambientSettingsSubmenu.addItem(focusOnVoiceMenuItem)
-        ambientSettingsMenuItem.submenu = ambientSettingsSubmenu
-        ncSubmenu.addItem(ambientSettingsMenuItem)
+        ncSubmenu.addItem(ambientLevelMenuItem)
+        configurePersistentButton(
+            focusOnVoiceButton,
+            in: focusOnVoiceMenuItem,
+            title: "Focus on Voice",
+            type: .switch,
+            action: #selector(toggleFocusOnVoiceButton(_:))
+        )
+        ncSubmenu.addItem(focusOnVoiceMenuItem)
+        ncSubmenu.addItem(ncOffItem)
 
         ncParentMenuItem.submenu = ncSubmenu
         popupMenu.addItem(ncParentMenuItem)
+        popupMenu.addItem(autoAmbientMenuItem)
+        popupMenu.addItem(autoAmbientSensitivityMenuItem)
 
-        speakToChatMenuItem.target = self
-        speakToChatMenuItem.action = #selector(toggleSpeakToChat)
-        popupMenu.addItem(speakToChatMenuItem)
+        configurePersistentButton(
+            speakToChatButton,
+            in: speakToChatMenuItem,
+            title: "Speak-to-Chat",
+            type: .switch,
+            action: #selector(toggleSpeakToChatButton(_:))
+        )
+        speakToChatSubmenu.addItem(speakToChatMenuItem)
+        speakToChatSubmenu.addItem(.separator())
+        configurePersistentButton(
+            speakSensitivityButton,
+            in: speakSensitivityMenuItem,
+            title: "Sensitivity: —",
+            type: .momentaryPushIn,
+            action: #selector(cycleSpeakSensitivity(_:))
+        )
+        configurePersistentButton(
+            speakTimeoutButton,
+            in: speakTimeoutMenuItem,
+            title: "Resume after: —",
+            type: .momentaryPushIn,
+            action: #selector(cycleSpeakTimeout(_:))
+        )
+        speakToChatSubmenu.addItem(speakSensitivityMenuItem)
+        speakToChatSubmenu.addItem(speakTimeoutMenuItem)
+        speakParentMenuItem.submenu = speakToChatSubmenu
+        popupMenu.addItem(speakParentMenuItem)
+
+        configurePersistentButton(
+            pauseWhenTakenOffButton,
+            in: wearingMenuItem,
+            title: "Wearing Detection",
+            type: .switch,
+            action: #selector(togglePauseWhenTakenOff(_:))
+        )
+        // This is a single setting, so keep it directly clickable while using
+        // a custom button to keep the menu open after the toggle.
+        popupMenu.addItem(wearingMenuItem)
+
+        listeningModeView.setShowsHeader(false)
+        listeningModeContentItem.view = listeningModeView
+        listeningModesSubmenu.addItem(listeningModeContentItem)
+        listeningModesMenuItem.submenu = listeningModesSubmenu
+        popupMenu.addItem(listeningModesMenuItem)
+
+        listeningModeView.onModeChanged = { [weak self] mode in
+            self?.controller.setListeningMode(mode)
+        }
+        listeningModeView.onRoomChanged = { [weak self] room in
+            self?.controller.setBgmRoomSize(room)
+        }
 
         popupMenu.addItem(.separator())
 
@@ -149,29 +479,188 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
         popupMenu.addItem(.separator())
 
-        reconnectMenuItem.target = self
-        reconnectMenuItem.action = #selector(reconnect)
+        configurePersistentActionButton(
+            reconnectButton,
+            in: reconnectMenuItem,
+            title: "Reconnect",
+            action: #selector(reconnectButtonPressed(_:))
+        )
         popupMenu.addItem(reconnectMenuItem)
+
+        showBatteryMenuItem.target = self
+        showBatteryMenuItem.action = #selector(toggleShowBatteryInMenuBar)
+        popupMenu.addItem(showBatteryMenuItem)
 
         hideIconMenuItem.target = self
         hideIconMenuItem.action = #selector(toggleHideIcon)
         popupMenu.addItem(hideIconMenuItem)
 
+        launchAtLoginMenuItem.target = self
+        launchAtLoginMenuItem.action = #selector(toggleLaunchAtLogin)
+        popupMenu.addItem(launchAtLoginMenuItem)
+
         openLogMenuItem.target = self
         openLogMenuItem.action = #selector(openLog)
         popupMenu.addItem(openLogMenuItem)
 
+        let quitMenuItem = NSMenuItem(
+            title: "Quit SonyConnect",
+            action: #selector(NSApplication.terminate(_:)),
+            keyEquivalent: "q"
+        )
+        popupMenu.addItem(quitMenuItem)
+        reorderPopupMenu(quitMenuItem: quitMenuItem)
+    }
+
+    private func reorderPopupMenu(quitMenuItem: NSMenuItem) {
+        popupMenu.removeAllItems()
+
+        let firstGroup = [
+            statusMenuItem,
+            batteryMenuItem,
+            volumeMenuItem,
+            eqPresetMenuItem,
+            multipointMenuItem
+        ]
+        let controlsGroup = [
+            ncParentMenuItem,
+            autoAmbientMenuItem,
+            autoAmbientSensitivityMenuItem,
+            listeningModesMenuItem,
+            speakParentMenuItem,
+            touchMenuItem,
+            wearingMenuItem
+        ]
+        let powerGroup = [
+            autoOffMenuItem,
+            powerOffMenuItem
+        ]
+        let utilityGroup = [
+            reconnectMenuItem,
+            showBatteryMenuItem,
+            hideIconMenuItem,
+            launchAtLoginMenuItem,
+            openLogMenuItem
+        ]
+
+        for (index, group) in [firstGroup, controlsGroup, powerGroup, utilityGroup].enumerated() {
+            if index > 0 {
+                popupMenu.addItem(.separator())
+            }
+            group.forEach { popupMenu.addItem($0) }
+        }
         popupMenu.addItem(.separator())
-        popupMenu.addItem(NSMenuItem(title: "Quit SonyConnect",
-                                     action: #selector(NSApplication.terminate(_:)),
-                                     keyEquivalent: "q"))
+        popupMenu.addItem(quitMenuItem)
+    }
+
+    private func configurePersistentButton(
+        _ button: NSButton,
+        in menuItem: NSMenuItem,
+        title: String,
+        type: NSButton.ButtonType,
+        action: Selector,
+        tag: Int = 0,
+        leftInset: CGFloat = 12
+    ) {
+        let width: CGFloat = 230
+        let height: CGFloat = 24
+
+        let container = NSView(
+            frame: NSRect(x: 0, y: 0, width: width, height: height)
+        )
+        container.autoresizingMask = [.width]
+
+        button.frame = NSRect(
+            x: leftInset,
+            y: 1,
+            width: width - leftInset - 12,
+            height: 22
+        )
+        button.autoresizingMask = [.width]
+        button.title = title
+        // Use a borderless push button for toggles and supply the same
+        // leading checkmark treatment as native NSMenuItems. The switch
+        // button style draws a rounded box, which does not match the rest of
+        // this menu.
+        button.setButtonType(type == .switch ? .pushOnPushOff : type)
+        button.bezelStyle = .regularSquare
+        button.isBordered = false
+        button.alignment = .left
+        if type == .switch {
+            button.imagePosition = .imageLeading
+            button.imageScaling = .scaleProportionallyDown
+            button.contentTintColor = .labelColor
+            button.image = menuCheckmarkImage(checked: false)
+        }
+        button.font = .menuFont(ofSize: 0)
+        button.target = self
+        button.action = action
+        button.tag = tag
+
+        container.addSubview(button)
+        menuItem.view = container
+    }
+
+    private func menuCheckmarkImage(checked: Bool) -> NSImage {
+        if checked {
+            return NSImage(
+                systemSymbolName: "checkmark",
+                accessibilityDescription: "Enabled"
+            ) ?? NSImage(size: NSSize(width: 16, height: 16))
+        }
+
+        return NSImage(size: NSSize(width: 16, height: 16))
+    }
+
+    private func setMenuCheckmark(
+        _ button: NSButton,
+        checked: Bool
+    ) {
+        button.image = menuCheckmarkImage(checked: checked)
+    }
+
+    private func configurePersistentActionButton(
+        _ button: NSButton,
+        in menuItem: NSMenuItem,
+        title: String,
+        action: Selector
+    ) {
+        let width: CGFloat = 230
+        let height: CGFloat = 24
+
+        let container = NSView(
+            frame: NSRect(x: 0, y: 0, width: width, height: height)
+        )
+        container.autoresizingMask = [.width]
+
+        // NSMenu already provides the outer menu inset for a custom item view.
+        // A small internal inset lines this title up with native menu rows.
+        button.frame = NSRect(
+            x: 12,
+            y: 1,
+            width: width - 24,
+            height: 22
+        )
+        button.autoresizingMask = [.width]
+        button.title = title
+        button.setButtonType(.momentaryPushIn)
+        button.bezelStyle = .regularSquare
+        button.isBordered = false
+        button.alignment = .left
+        button.font = .menuFont(ofSize: 0)
+        button.target = self
+        button.action = action
+        button.isEnabled = true
+
+        container.addSubview(button)
+        menuItem.view = container
     }
 
     private func configureVolumeItem() {
         let width: CGFloat = 230
         let height: CGFloat = 26
         let leftInset: CGFloat = 38
-        let rightInset: CGFloat = 14
+        let sliderWidth: CGFloat = 300
         let container = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
         // NSMenu stretches a custom item view to the menu's content width
         // when its autoresizing mask is flexible-width.
@@ -184,19 +673,32 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         icon.autoresizingMask = [.maxXMargin]   // pinned to the left
         container.addSubview(icon)
 
-        volumeSlider.frame = NSRect(x: leftInset, y: 3,
-                                    width: width - leftInset - rightInset, height: 20)
-        // Fixed left/right margins, flexible width → grows with the menu.
-        volumeSlider.autoresizingMask = [.width]
+        // Use explicit constraints so AppKit cannot stretch the track to the
+        // full width of the surrounding menu.
+        volumeSlider.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(volumeSlider)
+        NSLayoutConstraint.activate([
+            volumeSlider.leadingAnchor.constraint(
+                equalTo: container.leadingAnchor,
+                constant: leftInset
+            ),
+            volumeSlider.centerYAnchor.constraint(
+                equalTo: container.centerYAnchor
+            ),
+            volumeSlider.widthAnchor.constraint(
+                equalToConstant: sliderWidth
+            ),
+            volumeSlider.heightAnchor.constraint(equalToConstant: 20)
+        ])
         volumeSlider.minValue = 0
         volumeSlider.maxValue = 1
         volumeSlider.isContinuous = true
         volumeSlider.target = self
         volumeSlider.action = #selector(volumeChanged(_:))
-        container.addSubview(volumeSlider)
 
         volumeMenuItem.view = container
-        volumeMenuItem.isHidden = true
+        volumeMenuItem.isHidden = false
+        volumeSlider.isEnabled = false
     }
 
     @objc private func volumeChanged(_ sender: NSSlider) {
@@ -254,17 +756,14 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         controller.setAmbientLevel(sender.integerValue)
     }
 
-    @objc private func toggleFocusOnVoice() {
-        controller.setAmbientFocusOnVoice(focusOnVoiceMenuItem.state != .on)
-    }
-
     private func refreshVolumeItem(reachable: Bool) {
-        if reachable, let vol = volumeController.currentVolume() {
-            volumeSlider.floatValue = vol
-            volumeMenuItem.isHidden = false
-        } else {
-            volumeMenuItem.isHidden = true
+        guard reachable, let vol = volumeController.currentVolume() else {
+            volumeSlider.isEnabled = false
+            return
         }
+
+        volumeSlider.floatValue = vol
+        volumeSlider.isEnabled = true
     }
 
     // MARK: - Click routing
@@ -278,27 +777,102 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         statusItem.button?.performClick(nil)
     }
 
+    func revealForRecovery() {
+        guard preferences.hideIconWhenDisconnected,
+              !controller.state.deviceReachable else { return }
+
+        recoveryHideWorkItem?.cancel()
+        hasRestoredMenuAccess = true
+        render(state: controller.state)
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self, self.statusItem.menu !== self.popupMenu else { return }
+            self.hasRestoredMenuAccess = false
+            self.render(state: self.controller.state)
+        }
+        recoveryHideWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15, execute: workItem)
+    }
+
     func menuWillOpen(_ menu: NSMenu) {
-        // Counts as user activity — wakes the RFCOMM channel if the
-        // policy had idle-disconnected it.
-        controller.userActivity()
+        if menu === ncParentMenuItem.submenu {
+            noiseCancellingSubmenuIsOpen = true
+            return
+        }
+
+        hasRestoredMenuAccess = true
+        updateLaunchAtLoginMenuItem()
+        // Keep the Sony control channel alive for the entire time the
+        // user is interacting with the menu.
+        controller.menuOpened()
+
         // Pull the live output volume right before the menu is shown.
         refreshVolumeItem(reachable: controller.state.deviceReachable)
+        volumeRefreshTimer?.invalidate()
+        volumeRefreshTimer = Timer.scheduledTimer(
+            withTimeInterval: 0.15,
+            repeats: true
+        ) { [weak self] _ in
+            guard let self else { return }
+            self.refreshVolumeItem(
+                reachable: self.controller.state.deviceReachable
+            )
+        }
     }
 
     func menuDidClose(_ menu: NSMenu) {
+        if menu === ncParentMenuItem.submenu {
+            noiseCancellingSubmenuIsOpen = false
+            return
+        }
+
+        // Start the RFCOMM release grace period only after the menu closes.
+        volumeRefreshTimer?.invalidate()
+        volumeRefreshTimer = nil
+        controller.menuClosed()
+
+        if preferences.hideIconWhenDisconnected && !controller.state.deviceReachable {
+            hasRestoredMenuAccess = false
+            render(state: controller.state)
+        }
+
         // Detach the menu so the next click is routed through our action
-        // handler again (otherwise NSStatusItem auto-shows the menu on
-        // every click).
+        // handler again.
         DispatchQueue.main.async { [weak self] in
-            self?.statusItem.menu = nil
+            guard let self else { return }
+            self.statusItem.menu = nil
+            self.updateAmbientDetailVisibility(state: self.controller.state, keepVisibleWhileSubmenuOpen: false)
         }
     }
 
     // MARK: - State → UI
 
+    private func refreshOpenMenuUI() {
+        guard statusItem.menu === popupMenu else { return }
+
+        // AppKit's menu tracking loop does not always repaint items whose
+        // state changes asynchronously while the menu is already open.
+        // Force both native menu items and custom-view rows to refresh.
+        popupMenu.update()
+
+        for item in popupMenu.items {
+            if let view = item.view {
+                view.needsLayout = true
+                view.needsDisplay = true
+                view.layoutSubtreeIfNeeded()
+                view.displayIfNeeded()
+            }
+
+            item.submenu?.update()
+        }
+    }
+
     private func render(state: HeadphonesController.State) {
+        defer { refreshOpenMenuUI() }
+        notifyBatteryChanges(state: state)
         statusMenuItem.title = state.statusDescription
+        reconnectMenuItem.isHidden = state.isConnected
+        reconnectButton.isEnabled = true
         updateAutoOffSubmenu(state: state)
 
         // Default: the icon stays put and dims while the headphones are
@@ -307,9 +881,14 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         // HideIconWhenDisconnected -bool YES, or the toggle below): it looks
         // tidier, but while hidden the app is only reachable again by
         // reconnecting the headphones or flipping the default back.
-        hideIconMenuItem.state = Self.hideIconWhenDisconnected ? .on : .off
-        if Self.hideIconWhenDisconnected {
-            statusItem.isVisible = state.deviceReachable
+        showBatteryMenuItem.state = preferences.showBatteryInMenuBar ? .on : .off
+        hideIconMenuItem.state = preferences.hideIconWhenDisconnected ? .on : .off
+
+        updateStatusItemAppearance(state: state)
+        if preferences.hideIconWhenDisconnected {
+            // Keep the item visible until the user has had a chance to open
+            // the menu and turn this preference off after relaunch.
+            statusItem.isVisible = state.deviceReachable || hasRestoredMenuAccess
             statusItem.button?.appearsDisabled = false
         } else {
             statusItem.isVisible = true
@@ -317,118 +896,392 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         }
 
         if let level = state.batteryLevel {
-            let suffix = state.batteryCharging ? " (charging)" : ""
-            batteryMenuItem.title = "Battery: \(level)%\(suffix)"
+            let charging = state.batteryCharging ? " (charging)" : ""
+            let stale = state.isConnected ? "" : " (Last Known)"
+            batteryMenuItem.title = "Battery: \(level)%\(charging)\(stale)"
             batteryMenuItem.isHidden = false
         } else {
             batteryMenuItem.isHidden = true
         }
 
-        // Hide the volume slider when the headphones aren't reachable.
-        // (The live value is pulled in menuWillOpen so we don't fight a
-        // user mid-drag with a stray state update.)
-        if !state.deviceReachable {
-            volumeMenuItem.isHidden = true
-        }
+        // Volume is Mac-side CoreAudio state, not Sony protocol state.
+        // Refresh it whenever headphone reachability changes so an already-open
+        // menu becomes interactive immediately after the headphones reconnect.
+        refreshVolumeItem(reachable: state.deviceReachable)
 
-        // Equalizer (only once the device has reported its preset list)
-        if state.isConnected && !state.eqPresets.isEmpty {
+        // Retain the most recently reported EQ while RFCOMM is idle.
+        // Its submenu is informational only until a live control session exists.
+        if !state.eqPresets.isEmpty {
             updateEqSubmenu(presets: state.eqPresets, current: state.eqCurrentPresetId)
             let currentName = state.eqPresets.first { $0.id == state.eqCurrentPresetId }?.name ?? "—"
             eqPresetMenuItem.title = "Equalizer: \(currentName)"
             eqPresetMenuItem.isHidden = false
+            eqPresetMenuItem.isEnabled = state.isConnected
             eqView.setBands(state.eqBands)
         } else {
             eqPresetMenuItem.isHidden = true
         }
 
+        updateMultipointSubmenu(state: state)
+        updateDiscoveredFeatureMenus(state: state)
+
+        // Second-generation devices expose no touch-panel setting and no
+        // verified power-off opcode, so hide both instead of showing controls
+        // that would silently do nothing. Set before the disconnected early
+        // return so the rows reappear once a v1 device connects.
+
         if !state.isConnected {
-            touchMenuItem.title = "Touch Sensor: —"
-            touchMenuItem.state = .off
-            touchMenuItem.isEnabled = false
-            ncParentMenuItem.title = "Noise Cancelling: —"
-            ncParentMenuItem.isEnabled = false
-            ambientSettingsMenuItem.isEnabled = false
-            focusOnVoiceMenuItem.isEnabled = false
-            speakToChatMenuItem.title = "Speak-to-Chat: —"
-            speakToChatMenuItem.state = .off
-            speakToChatMenuItem.isEnabled = false
+            // Show cached Sony state, but never allow stale controls to send
+            // commands until a fresh RFCOMM session is initialized.
+            touchButton.title = "Touch Sensor"
+            touchButton.state = state.touchSensorEnabled == true ? .on : .off
+            setMenuCheckmark(
+                touchButton,
+                checked: state.touchSensorEnabled == true
+            )
+            touchButton.isEnabled = true
+
+            let ncLabel: String
+            switch state.ncMode {
+            case .some(.noiseCancelling): ncLabel = "ON"
+            case .some(.ambient): ncLabel = "Ambient"
+            case .some(.off): ncLabel = "Off"
+            case .none: ncLabel = "—"
+            }
+            ncParentMenuItem.title = state.ncMode == nil
+                ? "Noise Cancelling"
+                : "Noise Cancelling: \(ncLabel)"
+            ncParentMenuItem.isEnabled = true
+
+            ncOnButton.state = state.ncMode == .noiseCancelling ? .on : .off
+            ncAmbientButton.state = state.ncMode == .ambient ? .on : .off
+            ncOffButton.state = state.ncMode == .off ? .on : .off
+            ncOnButton.isEnabled = false
+            ncAmbientButton.isEnabled = false
+            ncOffButton.isEnabled = false
+
+            updateAmbientDetailVisibility(state: state, keepVisibleWhileSubmenuOpen: false)
+            autoAmbientButton.state = state.autoAmbientSoundEnabled == true ? .on : .off
+            setMenuCheckmark(
+                autoAmbientButton,
+                checked: state.autoAmbientSoundEnabled == true
+            )
+            autoAmbientButton.isEnabled = true
+            autoAmbientSensitivityButton.title = "Sensitivity: \(state.autoAmbientSensitivity.label)"
+            autoAmbientSensitivityButton.isEnabled = false
+            ambientLevelSlider.integerValue = state.ambientLevel
+            focusOnVoiceButton.state = state.ambientFocusOnVoice ? .on : .off
+            focusOnVoiceButton.isEnabled = false
+
+            speakToChatButton.title = "Speak-to-Chat"
+            speakToChatButton.state = state.speakToChatEnabled == true ? .on : .off
+            speakToChatButton.isEnabled = false
+
             powerOffMenuItem.isEnabled = false
             return
         }
-        powerOffMenuItem.isEnabled = true
-
         // Touch sensor row
         switch state.touchSensorEnabled {
         case .some(true):
-            touchMenuItem.title = "Touch Sensor: ON"
-            touchMenuItem.state = .on
-            touchMenuItem.isEnabled = true
+            touchButton.title = "Touch Sensor"
+            touchButton.state = .on
+            setMenuCheckmark(touchButton, checked: true)
+            touchButton.isEnabled = true
         case .some(false):
-            touchMenuItem.title = "Touch Sensor: OFF"
-            touchMenuItem.state = .off
-            touchMenuItem.isEnabled = true
+            touchButton.title = "Touch Sensor"
+            touchButton.state = .off
+            setMenuCheckmark(touchButton, checked: false)
+            touchButton.isEnabled = true
         case .none:
-            touchMenuItem.title = "Touch Sensor: …"
-            touchMenuItem.state = .off
-            touchMenuItem.isEnabled = false
+            touchButton.title = "Touch Sensor"
+            touchButton.state = .off
+            setMenuCheckmark(touchButton, checked: false)
+            touchButton.isEnabled = true
         }
 
         // Noise Cancelling submenu
         ncParentMenuItem.isEnabled = true
+        ncOnButton.isEnabled = true
+        ncAmbientButton.isEnabled = true
+        ncOffButton.isEnabled = true
+
         let ncLabel: String
         switch state.ncMode {
         case .some(.noiseCancelling): ncLabel = "ON"
         case .some(.ambient): ncLabel = "Ambient"
         case .some(.off): ncLabel = "Off"
-        case .none: ncLabel = "…"
+        case .none: ncLabel = ""
         }
-        ncParentMenuItem.title = "Noise Cancelling: \(ncLabel)"
-        ncOnItem.state = state.ncMode == .noiseCancelling ? .on : .off
-        ncAmbientItem.state = state.ncMode == .ambient ? .on : .off
-        ncOffItem.state = state.ncMode == .off ? .on : .off
+        ncParentMenuItem.title = ncLabel.isEmpty
+            ? "Noise Cancelling"
+            : "Noise Cancelling: \(ncLabel)"
+        ncOnButton.state = state.ncMode == .noiseCancelling ? .on : .off
+        ncAmbientButton.state = state.ncMode == .ambient ? .on : .off
+        ncOffButton.state = state.ncMode == .off ? .on : .off
 
         // Ambient Sound settings (level slider + Focus on Voice) only make
         // sense while Ambient mode is actually active on the device.
         let ambientActive = state.ncMode == .ambient
-        ambientSettingsMenuItem.isEnabled = ambientActive
+        updateAmbientDetailVisibility(state: state, keepVisibleWhileSubmenuOpen: true)
+        autoAmbientButton.state = state.autoAmbientSoundEnabled == true ? .on : .off
+        setMenuCheckmark(
+            autoAmbientButton,
+            checked: state.autoAmbientSoundEnabled == true
+        )
+        autoAmbientButton.isEnabled = true
+        autoAmbientSensitivityButton.title = "Sensitivity: \(state.autoAmbientSensitivity.label)"
+        autoAmbientSensitivityButton.isEnabled = true
         ambientLevelSlider.integerValue = state.ambientLevel
-        focusOnVoiceMenuItem.isEnabled = ambientActive
-        focusOnVoiceMenuItem.state = state.ambientFocusOnVoice ? .on : .off
+        focusOnVoiceButton.isEnabled = ambientActive
+        focusOnVoiceButton.state = state.ambientFocusOnVoice ? .on : .off
 
         // Speak-to-Chat
-        speakToChatMenuItem.isEnabled = state.speakToChatEnabled != nil
+        speakToChatButton.isEnabled = state.speakToChatEnabled != nil
+        speakToChatButton.title = "Speak-to-Chat"
+
         switch state.speakToChatEnabled {
         case .some(true):
-            speakToChatMenuItem.title = "Speak-to-Chat: ON"
-            speakToChatMenuItem.state = .on
+            speakToChatButton.state = .on
         case .some(false):
-            speakToChatMenuItem.title = "Speak-to-Chat: OFF"
-            speakToChatMenuItem.state = .off
+            speakToChatButton.state = .off
         case .none:
-            speakToChatMenuItem.title = "Speak-to-Chat: …"
-            speakToChatMenuItem.state = .off
+            speakToChatButton.state = .off
         }
+    }
+
+    private func notifyBatteryChanges(state: HeadphonesController.State) {
+        guard state.deviceReachable, let level = state.batteryLevel else { return }
+
+        defer {
+            lastBatteryLevel = level
+            lastBatteryCharging = state.batteryCharging
+        }
+
+        guard let previousLevel = lastBatteryLevel,
+              let previousCharging = lastBatteryCharging else {
+            return
+        }
+
+        if previousCharging != state.batteryCharging {
+            let text = state.batteryCharging
+                ? "Headphones are charging at \(level)%."
+                : "Headphones stopped charging at \(level)%."
+            deliverBatteryNotification(text)
+        } else if previousLevel > 20 && level <= 20 {
+            deliverBatteryNotification("Headphones battery is low (\(level)%).")
+        }
+    }
+
+    private func deliverBatteryNotification(_ text: String) {
+        let content = UNMutableNotificationContent()
+        content.title = "SonyConnect"
+        content.body = text
+        let request = UNNotificationRequest(
+            identifier: "battery-\(UUID().uuidString)",
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request) { error in
+            if let error {
+                FileLogger.shared.log("notifications", "battery notification failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func updateAmbientDetailVisibility(
+        state: HeadphonesController.State,
+        keepVisibleWhileSubmenuOpen: Bool
+    ) {
+        let ambientActive = state.ncMode == .ambient
+        let keepVisible = keepVisibleWhileSubmenuOpen && noiseCancellingSubmenuIsOpen
+
+        autoAmbientMenuItem.isHidden = !state.autoAmbientSoundAvailable && !keepVisible
+        autoAmbientSensitivityMenuItem.isHidden =
+            !(state.autoAmbientSoundAvailable && state.autoAmbientSoundEnabled == true) && !keepVisible
+        autoAmbientMenuItem.isEnabled = true
+        autoAmbientSensitivityMenuItem.isEnabled = true
+        ambientLevelMenuItem.isHidden = !ambientActive && !keepVisible
+        focusOnVoiceMenuItem.isHidden = !ambientActive && !keepVisible
+        ambientLevelMenuItem.isEnabled = ambientActive
+        focusOnVoiceButton.isEnabled = ambientActive
+    }
+
+    private func updateMultipointSubmenu(
+        state: HeadphonesController.State
+    ) {
+        let supported =
+            state.isWH1000XM6 &&
+            (
+                state.multipointToggleAvailable ||
+                !state.connectedDevices.isEmpty
+            )
+
+        multipointMenuItem.isHidden = !supported
+        multipointMenuItem.isEnabled = state.isConnected
+
+        guard supported else {
+            return
+        }
+
+        multipointManagerView.render(
+            state: state
+        )
+    }
+
+    private func updateDiscoveredFeatureMenus(state: HeadphonesController.State) {
+        let live = state.isConnected
+        wearingMenuItem.isHidden = !state.pauseWhenTakenOffAvailable
+        wearingMenuItem.isEnabled = true
+        pauseWhenTakenOffButton.state = state.pauseWhenTakenOff == true ? .on : .off
+        setMenuCheckmark(
+            pauseWhenTakenOffButton,
+            checked: state.pauseWhenTakenOff == true
+        )
+        pauseWhenTakenOffButton.isEnabled = true
+
+        listeningModesMenuItem.isHidden = !state.listeningModesAvailable
+        listeningModesMenuItem.isEnabled = live
+        let listeningMode = state.listeningMode ?? .standard
+        listeningModesMenuItem.title = "Listening Mode: \(listeningMode.rawValue)"
+        listeningModeView.render(state: state)
+
+        let sensitivity = speakSensitivityLabel(state.speakToChatSensitivity)
+        let timeout = speakTimeoutLabel(state.speakToChatTimeout)
+        speakParentMenuItem.title = state.speakToChatEnabled == true
+            ? "Speak-to-Chat: On"
+            : "Speak-to-Chat: Off"
+        speakSensitivityButton.title = "Sensitivity: \(sensitivity)"
+        speakTimeoutButton.title = "Resume after: \(timeout)"
+        speakSensitivityMenuItem.isEnabled = live && state.speakToChatConfigAvailable
+        speakTimeoutMenuItem.isEnabled = live && state.speakToChatConfigAvailable
     }
 
     // MARK: - Menu actions
 
-    @objc private func toggleTouchSensor() {
+    @objc private func toggleTouchSensorButton(_ sender: NSButton) {
+        guard controller.state.isConnected,
+              controller.state.touchSensorEnabled != nil else {
+            return
+        }
         controller.toggleTouchSensor()
     }
 
-    @objc private func setNCFromMenu(_ sender: NSMenuItem) {
+    @objc private func setNCFromButton(_ sender: NSButton) {
         let mode: HeadphonesController.NCMode
+
         switch sender.tag {
-        case 0: mode = .noiseCancelling
-        case 1: mode = .ambient
-        default: mode = .off
+        case 0:
+            mode = .noiseCancelling
+        case 1:
+            mode = .ambient
+        default:
+            mode = .off
         }
+
         controller.setNCMode(mode)
     }
 
-    @objc private func toggleSpeakToChat() {
+    @objc private func toggleSpeakToChatButton(_ sender: NSButton) {
         controller.toggleSpeakToChat()
+    }
+
+    @objc private func togglePauseWhenTakenOff(_ sender: NSButton) {
+        guard controller.state.isConnected,
+              controller.state.pauseWhenTakenOff != nil else {
+            return
+        }
+        controller.setPauseWhenTakenOff(sender.state == .on)
+    }
+
+    @objc private func setListeningMode(_ sender: NSButton) {
+        let mode: HeadphonesController.ListeningMode
+        switch sender.tag {
+        case 1: mode = .backgroundMusic
+        case 2: mode = .cinema
+        default: mode = .standard
+        }
+        controller.setListeningMode(mode)
+    }
+
+    @objc private func setBgmRoomSize(_ sender: NSButton) {
+        controller.setBgmRoomSize(UInt8(sender.tag))
+    }
+
+    private func bgmRoomName(_ value: UInt8?) -> String {
+        switch value {
+        case 0x00: return "My Room"
+        case 0x01: return "Living Room"
+        case 0x02: return "Cafe"
+        default: return "My Room"
+        }
+    }
+
+    private var listeningButtons: [Int: NSButton] = [:]
+
+    private func listeningButton(for item: NSMenuItem, tag: Int) -> NSButton {
+        if let button = listeningButtons[tag] { return button }
+        let button = NSButton()
+        button.tag = tag
+        listeningButtons[tag] = button
+        return button
+    }
+
+    private func speakSensitivityLabel(_ value: UInt8?) -> String {
+        switch value {
+        case 0: return "Low"
+        case 1: return "Standard"
+        case 2: return "High"
+        case 3: return "Very High"
+        case 4: return "Maximum"
+        default: return "—"
+        }
+    }
+
+    private func speakTimeoutLabel(_ value: UInt8?) -> String {
+        switch value {
+        case 0: return "Immediate"
+        case 1: return "15 seconds"
+        case 2: return "30 seconds"
+        case 3: return "60 seconds"
+        default: return "—"
+        }
+    }
+
+    @objc private func cycleSpeakSensitivity(_ sender: NSMenuItem) {
+        let current = controller.state.speakToChatSensitivity ?? 0
+        let next = (current + 1) % 5
+        controller.setSpeakToChatConfiguration(
+            sensitivity: next,
+            timeout: controller.state.speakToChatTimeout ?? 0
+        )
+    }
+
+    @objc private func cycleSpeakTimeout(_ sender: NSMenuItem) {
+        let current = controller.state.speakToChatTimeout ?? 0
+        let next = (current + 1) % 4
+        controller.setSpeakToChatConfiguration(
+            sensitivity: controller.state.speakToChatSensitivity ?? 0,
+            timeout: next
+        )
+    }
+
+    @objc private func toggleFocusOnVoiceButton(_ sender: NSButton) {
+        controller.setAmbientFocusOnVoice(sender.state == .on)
+    }
+
+    @objc private func toggleAutoAmbientButton(_ sender: NSButton) {
+        guard controller.state.isConnected,
+              controller.state.autoAmbientSoundAvailable else {
+            return
+        }
+        controller.setAutoAmbientSound(sender.state == .on)
+    }
+
+    @objc private func cycleAutoAmbientSensitivity(_ sender: NSButton) {
+        let values = HeadphonesController.AutoAmbientSensitivity.allCases
+        let current = controller.state.autoAmbientSensitivity
+        let nextIndex = (values.firstIndex(of: current).map { $0 + 1 } ?? 0) % values.count
+        controller.setAutoAmbientSensitivity(values[nextIndex])
     }
 
     private func updateEqSubmenu(presets: [HeadphonesController.EqPreset], current: UInt8?) {
@@ -445,27 +1298,44 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     // Rebuilt on demand: "When taken off" only exists on v2, so the option
     // list depends on the connected device.
     private func updateAutoOffSubmenu(state: HeadphonesController.State) {
-        let options = AutoPowerOffOption.selectable
+        let options = AutoPowerOffOption.selectable(
+            isV2: state.protocolIsV2,
+            isXM6: state.isWH1000XM6
+        )
         if autoOffSubmenu.items.count != options.count {
             autoOffSubmenu.removeAllItems()
+            autoOffButtons.removeAll()
+
             for option in options {
-                let item = NSMenuItem(title: option.title,
-                                      action: #selector(setAutoOffFromMenu(_:)),
-                                      keyEquivalent: "")
-                item.target = self
-                item.tag = option.rawValue
+                let item = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+                let button = NSButton()
+
+                configurePersistentButton(
+                    button,
+                    in: item,
+                    title: option.title,
+                    type: .radio,
+                    action: #selector(setAutoOffFromButton(_:)),
+                    tag: option.rawValue
+                )
+
+                autoOffButtons[option.rawValue] = button
                 autoOffSubmenu.addItem(item)
             }
         }
-        for item in autoOffSubmenu.items {
-            item.state = item.tag == state.autoOffOption.rawValue ? .on : .off
+
+        for option in options {
+            autoOffButtons[option.rawValue]?.state =
+                option == state.autoOffOption ? .on : .off
         }
-        autoOffMenuItem.title = state.autoOffOption == .off
-            ? "Auto Power Off: Off"
-            : "Auto Power Off: \(state.autoOffOption.title)"
+        let autoOffValue = state.autoOffOption == .off
+            ? "Off"
+            : state.autoOffOption.title
+        autoOffMenuItem.title = "Auto Power Off: \(autoOffValue)"
+        autoOffMenuItem.isEnabled = state.isConnected
     }
 
-    @objc private func setAutoOffFromMenu(_ sender: NSMenuItem) {
+    @objc private func setAutoOffFromButton(_ sender: NSButton) {
         guard let option = AutoPowerOffOption(rawValue: sender.tag) else { return }
         controller.autoOffOption = option
     }
@@ -474,13 +1344,50 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         controller.powerOff()
     }
 
-    @objc private func reconnect() {
+    @objc private func reconnectButtonPressed(_ sender: NSButton) {
         controller.connect()
     }
 
-    @objc private func toggleHideIcon() {
-        Self.hideIconWhenDisconnected.toggle()
+    @objc private func toggleShowBatteryInMenuBar() {
+        preferences.showBatteryInMenuBar.toggle()
         render(state: controller.state)
+    }
+
+    @objc private func toggleHideIcon() {
+        preferences.hideIconWhenDisconnected.toggle()
+        render(state: controller.state)
+    }
+
+    @objc private func toggleLaunchAtLogin() {
+        let result = launchAtLogin.setEnabled(!launchAtLogin.isEnabled)
+        switch result {
+        case .changed:
+            updateLaunchAtLoginMenuItem()
+        case .unsupported:
+            showLaunchAtLoginAlert(
+                message: "Launch at Login requires macOS 13 or later."
+            )
+        case .failed(let error):
+            FileLogger.shared.log("login", "could not change registration: \(error.localizedDescription)")
+            showLaunchAtLoginAlert(
+                message: "SonyConnect could not change its Launch at Login setting.\n\n\(error.localizedDescription)"
+            )
+        }
+    }
+
+    private func updateLaunchAtLoginMenuItem() {
+        launchAtLoginMenuItem.state = launchAtLogin.isEnabled ? .on : .off
+        launchAtLoginMenuItem.isEnabled = launchAtLogin.isSupported
+    }
+
+    private func showLaunchAtLoginAlert(message: String) {
+        let alert = NSAlert()
+        alert.messageText = "Launch at Login"
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+        updateLaunchAtLoginMenuItem()
     }
 
     @objc private func openLog() {

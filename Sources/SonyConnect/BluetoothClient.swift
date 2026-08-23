@@ -11,7 +11,25 @@ private let sonyServiceUUIDBytes: [UInt8] = [
     0xE3, 0x16, 0xF5, 0xE0, 0x69, 0xBA,
 ]
 
+// Second-generation service UUID (WH-CH720N, WH/WF-1000XM5, recent XM4 units).
+// Devices advertise either this or the v1 UUID above — never both — and the
+// payload opcodes differ per generation even though the framing is identical.
+private let sonyServiceUUIDV2Bytes: [UInt8] = [
+    0x95, 0x6C, 0x7B, 0x26,
+    0xD4, 0x9A,
+    0x4B, 0xA8,
+    0xB0, 0x3F,
+    0xB1, 0x7D, 0x39, 0x3C, 0xB6, 0xE2,
+]
+
 private let log = Logger(subsystem: "com.tanat.sonyconnect", category: "bluetooth")
+
+// Which generation of Sony's MDR protocol the connected device speaks. Set
+// during service discovery from whichever service UUID the device advertises.
+enum SonyProtocolVersion {
+    case v1
+    case v2
+}
 
 final class BluetoothClient: NSObject {
     enum Status {
@@ -29,10 +47,15 @@ final class BluetoothClient: NSObject {
     // Passes (reachable, deviceName?).
     var onReachabilityChange: ((Bool, String?) -> Void)?
 
+    // Valid once status reaches .connected; reflects which service UUID opened
+    // the channel. Callers use it to pick the matching opcode set.
+    private(set) var protocolVersion: SonyProtocolVersion = .v1
+
     private var channel: IOBluetoothRFCOMMChannel?
     private var device: IOBluetoothDevice?
     private var reconnectTimer: Timer?
     private var suppressAutoReconnect = false
+    private var lastSuccessfulDeviceAddress: String?
     private var connectNotification: IOBluetoothUserNotification?
     private var disconnectNotification: IOBluetoothUserNotification?
     private static let reconnectInterval: TimeInterval = 5
@@ -77,8 +100,21 @@ final class BluetoothClient: NSObject {
 
     private func targetPairedDevice() -> IOBluetoothDevice? {
         guard let raw = IOBluetoothDevice.pairedDevices() else { return nil }
-        let devices = raw.compactMap { $0 as? IOBluetoothDevice }
-        return devices.first { isTargetDevice($0) }
+
+        let devices = raw
+            .compactMap { $0 as? IOBluetoothDevice }
+            .filter { isTargetDevice($0) }
+
+        if let connected = devices.first(where: { $0.isConnected() }) {
+            return connected
+        }
+
+        if let address = lastSuccessfulDeviceAddress,
+           let lastUsed = devices.first(where: { $0.addressString == address }) {
+            return lastUsed
+        }
+
+        return devices.first
     }
 
     private func isTargetDevice(_ device: IOBluetoothDevice) -> Bool {
@@ -96,15 +132,58 @@ final class BluetoothClient: NSObject {
 
     @objc private func aclDeviceConnected(_ notification: IOBluetoothUserNotification, device: IOBluetoothDevice) {
         guard isTargetDevice(device) else { return }
+
         FileLogger.shared.log("bt", "ACL connected: \(device.name ?? "?")")
         registerDisconnect(for: device)
         onReachabilityChange?(true, device.name)
+
+        // If an RFCOMM attempt died because the headphones temporarily
+        // disappeared, retry immediately when the base Bluetooth link returns.
+        // An intentional idle release keeps suppressAutoReconnect set, so this
+        // does not reopen the Sony control channel behind the user's back.
+        guard !suppressAutoReconnect else { return }
+
+        switch status {
+        case .disconnected, .failed:
+            FileLogger.shared.log("bt", "ACL restored → retry RFCOMM")
+            connect()
+        case .searching, .connecting, .connected:
+            break
+        }
     }
 
     @objc private func aclDeviceDisconnected(_ notification: IOBluetoothUserNotification, device: IOBluetoothDevice) {
         guard isTargetDevice(device) else { return }
+
         FileLogger.shared.log("bt", "ACL disconnected: \(device.name ?? "?")")
         onReachabilityChange?(false, device.name)
+
+        // An ACL loss invalidates every RFCOMM state, including an asynchronous
+        // channel open that has not completed yet. Without this transition the
+        // client can remain stuck in .connecting forever, causing connect() to
+        // reject every later retry.
+        channel = nil
+        self.device = nil
+
+        switch status {
+        case .disconnected:
+            break
+        case .searching, .connecting, .connected, .failed:
+            status = .disconnected
+        }
+    }
+
+    func setAutoReconnectEnabled(_ enabled: Bool) {
+        suppressAutoReconnect = !enabled
+
+        if !enabled {
+            cancelReconnect()
+        }
+
+        FileLogger.shared.log(
+            "bt",
+            "automatic RFCOMM reconnect \(enabled ? "enabled" : "disabled")"
+        )
     }
 
     func connect() {
@@ -184,9 +263,25 @@ final class BluetoothClient: NSObject {
 
     @discardableResult
     private func findServiceAndOpen(device: IOBluetoothDevice) -> Bool {
-        let uuid = IOBluetoothSDPUUID(bytes: sonyServiceUUIDBytes, length: sonyServiceUUIDBytes.count)
-        guard let record = device.getServiceRecord(for: uuid) else {
-            FileLogger.shared.log("bt", "Sony service UUID not found in cached SDP records")
+        // Try the original UUID first, then the second-generation one. A device
+        // advertises exactly one of them, and that choice determines which
+        // opcode set the rest of the session must use.
+        let candidates: [(SonyProtocolVersion, [UInt8])] = [
+            (.v1, sonyServiceUUIDBytes),
+            (.v2, sonyServiceUUIDV2Bytes),
+        ]
+
+        var found: (version: SonyProtocolVersion, record: IOBluetoothSDPServiceRecord)?
+        for (version, bytes) in candidates {
+            let uuid = IOBluetoothSDPUUID(bytes: bytes, length: bytes.count)
+            if let record = device.getServiceRecord(for: uuid) {
+                found = (version, record)
+                break
+            }
+        }
+
+        guard let (version, record) = found else {
+            FileLogger.shared.log("bt", "Neither v1 nor v2 Sony service UUID found in cached SDP records")
             if let allRecords = device.services as? [IOBluetoothSDPServiceRecord] {
                 for r in allRecords {
                     var ch: BluetoothRFCOMMChannelID = 0
@@ -196,7 +291,9 @@ final class BluetoothClient: NSObject {
             }
             return false
         }
-        FileLogger.shared.log("bt", "Sony service found: \(record.getServiceName() ?? "?")")
+
+        protocolVersion = version
+        FileLogger.shared.log("bt", "Sony service found: \(record.getServiceName() ?? "?") protocol=\(version)")
 
         var channelID: BluetoothRFCOMMChannelID = 0
         let getResult = record.getRFCOMMChannelID(&channelID)
@@ -226,7 +323,7 @@ extension BluetoothClient {
             return
         }
         if !findServiceAndOpen(device: device) {
-            self.status = .failed(reason: "Sony service UUID not advertised by device")
+            self.status = .failed(reason: "No Sony control service (v1 or v2) advertised by device")
         }
     }
 }
@@ -237,6 +334,9 @@ extension BluetoothClient: IOBluetoothRFCOMMChannelDelegate {
             status = .failed(reason: "RFCOMM open failed: \(error)")
             channel = nil
             return
+        }
+        if let connectedDevice = rfcommChannel.getDevice() {
+            lastSuccessfulDeviceAddress = connectedDevice.addressString
         }
         let name = rfcommChannel.getDevice()?.name ?? "Sony headphones"
         status = .connected(deviceName: name)

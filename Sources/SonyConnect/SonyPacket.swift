@@ -12,8 +12,9 @@ import Foundation
 
 enum SonyDataType: UInt8 {
     case ack = 0x01
-    case command1 = 0x0C
+    case command1 = 0x0C          // DATA_MDR / V2 Table 1
     case command1Response = 0x0D
+    case command2 = 0x0E          // DATA_MDR_NO2 / V2 Table 2
 }
 
 struct SonyPacket {
