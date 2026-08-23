@@ -141,7 +141,7 @@ final class HeadphonesController {
         static let gsRet: UInt8 = 0xD7
         static let gsSet: UInt8 = 0xD8           // D8 D2 00 <inverted>
         static let gsNotify: UInt8 = 0xD9
-        static let touchPanelSlot: UInt8 = 0xD2
+        // Touch-panel slot is discovered at runtime from GENERAL_SETTING_GET_CAPABILITY.
         // Auto power off runs on the device: send the setting once and the
         // headphones keep their own timer.
         static let apoGet: UInt8 = 0x26          // 26 05        -> RET 27 05 <c0> <c1>
@@ -389,17 +389,27 @@ final class HeadphonesController {
     // v2 keeps the general-setting opcodes but stores the flag inverted, and
     // the touch panel always sits in slot 0xD2 rather than being discovered.
     private func sendTouchSensorV2(enabled: Bool) {
-        sendPayload([V2Opcode.gsSet, V2Opcode.touchPanelSlot, 0x00, enabled ? 0x00 : 0x01],
-                    label: "TouchSensor SET (v2)=\(enabled ? "ON" : "OFF")")
+        guard let slot = touchPanelSlot else {
+            FileLogger.shared.log("cmd", "TouchSensor SET (v2) skipped: touch-panel slot not discovered")
+            return
+        }
+        sendPayload([V2Opcode.gsSet, slot, 0x00, enabled ? 0x00 : 0x01],
+                    label: "TouchSensor SET (v2)=\(enabled ? "ON" : "OFF") slot=\(String(format: "0x%02X", slot))")
     }
 
     private func sendTouchSensorGetV2() {
-        sendPayload([V2Opcode.gsGet, V2Opcode.touchPanelSlot], label: "TouchSensor GET (v2)")
+        guard let slot = touchPanelSlot else {
+            FileLogger.shared.log("cmd", "TouchSensor GET (v2) skipped: touch-panel slot not discovered")
+            return
+        }
+        sendPayload([V2Opcode.gsGet, slot],
+                    label: "TouchSensor GET (v2) slot=\(String(format: "0x%02X", slot))")
     }
 
     private func parseTouchSensorV2(_ payload: [UInt8]) {
-        guard payload.count >= 4, payload[1] == V2Opcode.touchPanelSlot else { return }
-        // Inverted vs v1: 0 means enabled.
+        guard payload.count >= 4,
+              let slot = touchPanelSlot,
+              payload[1] == slot else { return }
         let enabled = payload[payload.count - 1] == 0x00
         state.touchSensorEnabled = enabled
         FileLogger.shared.log("state", "TouchSensor v2 = \(enabled ? "ON" : "OFF")")
@@ -581,14 +591,12 @@ final class HeadphonesController {
             self?.sendEqGet()
         }
         if isV2 {
-            // Device-side timer and a fixed touch-panel slot: query both
-            // instead of arming our own countdown or probing capabilities.
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
                 self?.sendPayload([V2Opcode.apoGet, V2Opcode.apoInquiredType],
                                   label: "AUTO_POWER_OFF GET (v2)")
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.7) { [weak self] in
-                self?.sendTouchSensorGetV2()
+                self?.queryGeneralSettingCapabilities()
             }
         } else {
             autoOff.arm(deviceName: deviceName)
@@ -844,6 +852,8 @@ final class HeadphonesController {
             parseBtnModeV2(packet.payload)
         case V2Opcode.apoRet:
             parseAutoPowerOffV2(packet.payload)
+        case Opcode.gsRetCapability:
+            parseGsCapabilityV2(packet.payload)
         case V2Opcode.gsRet, V2Opcode.gsNotify:
             parseTouchSensorV2(packet.payload)
         case V2Opcode.initReply:
@@ -851,6 +861,31 @@ final class HeadphonesController {
         default:
             FileLogger.shared.log("state",
                 "v2 unhandled opcode 0x\(String(format: "%02X", opcode))")
+        }
+    }
+
+    private func parseGsCapabilityV2(_ payload: [UInt8]) {
+        guard payload.count >= 5 else { return }
+
+        let slot = payload[1]
+        let nameLen = Int(payload[4])
+        guard payload.count >= 5 + nameLen else { return }
+
+        let nameBytes = Array(payload[5..<(5 + nameLen)])
+        let name = String(bytes: nameBytes, encoding: .ascii) ?? "<bad>"
+
+        FileLogger.shared.log(
+            "state",
+            "GS v2 slot=\(String(format: "0x%02X", slot)) name='\(name)'"
+        )
+
+        if name == "TOUCH_PANEL_SETTING" {
+            touchPanelSlot = slot
+            FileLogger.shared.log(
+                "state",
+                "→ Touch panel v2 discovered at slot \(String(format: "0x%02X", slot))"
+            )
+            sendTouchSensorGetV2()
         }
     }
 
