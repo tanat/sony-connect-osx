@@ -55,6 +55,7 @@ final class BluetoothClient: NSObject {
     private var device: IOBluetoothDevice?
     private var reconnectTimer: Timer?
     private var suppressAutoReconnect = false
+    private var lastSuccessfulDeviceAddress: String?
     private var connectNotification: IOBluetoothUserNotification?
     private var disconnectNotification: IOBluetoothUserNotification?
     private static let reconnectInterval: TimeInterval = 5
@@ -106,6 +107,11 @@ final class BluetoothClient: NSObject {
 
         if let connected = devices.first(where: { $0.isConnected() }) {
             return connected
+        }
+
+        if let address = lastSuccessfulDeviceAddress,
+           let lastUsed = devices.first(where: { $0.addressString == address }) {
+            return lastUsed
         }
 
         return devices.first
@@ -285,6 +291,9 @@ extension BluetoothClient: IOBluetoothRFCOMMChannelDelegate {
             status = .failed(reason: "RFCOMM open failed: \(error)")
             channel = nil
             return
+        }
+        if let connectedDevice = rfcommChannel.getDevice() {
+            lastSuccessfulDeviceAddress = connectedDevice.addressString
         }
         let name = rfcommChannel.getDevice()?.name ?? "Sony headphones"
         status = .connected(deviceName: name)
