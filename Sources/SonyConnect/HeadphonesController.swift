@@ -1,8 +1,29 @@
 import Foundation
+import IOBluetooth
 
 final class HeadphonesController {
     enum NCMode: String {
         case noiseCancelling, ambient, off
+    }
+
+    enum ListeningMode: String {
+        case standard = "Standard"
+        case backgroundMusic = "Background Music"
+        case cinema = "Cinema"
+    }
+
+    enum AutoAmbientSensitivity: UInt8, CaseIterable {
+        case standard = 0
+        case high = 1
+        case low = 2
+
+        var label: String {
+            switch self {
+            case .standard: return "Standard"
+            case .high: return "High"
+            case .low: return "Low"
+            }
+        }
     }
 
     struct EqPreset {
@@ -27,6 +48,19 @@ final class HeadphonesController {
         var touchSensorEnabled: Bool? = nil
         var ncMode: NCMode? = nil
         var speakToChatEnabled: Bool? = nil
+        var speakToChatConfigAvailable: Bool = false
+        var speakToChatSensitivity: UInt8? = nil
+        var speakToChatTimeout: UInt8? = nil
+        var pauseWhenTakenOff: Bool? = nil
+        var pauseWhenTakenOffAvailable: Bool = false
+        var listeningMode: ListeningMode? = .standard
+        var bgmRoomSize: UInt8? = 0x00
+        var listeningModesAvailable: Bool = false
+        var bgmModeAvailable: Bool = false
+        var cinemaModeAvailable: Bool = false
+        var autoAmbientSoundAvailable: Bool = false
+        var autoAmbientSoundEnabled: Bool? = nil
+        var autoAmbientSensitivity: AutoAmbientSensitivity = .standard
         var batteryLevel: Int? = nil
         var batteryCharging: Bool = false
         var eqPresets: [EqPreset] = []
@@ -50,6 +84,19 @@ final class HeadphonesController {
         // Keep the requested state pending until the headset confirms it
         // or the Sony control session is reset/reconnected.
         var pendingMultipointEnabled: Bool? = nil
+
+        // Pairing / full multipoint manager state.
+        var pairingModeAvailable: Bool = false
+        var pairingMode: Bool? = nil
+        var pendingPairingMode: Bool? = nil
+
+        // Two-phase swap operation:
+        // disconnect one current device, then connect a known replacement.
+        var multipointSwapInProgress: Bool = false
+
+        // Local Mac Bluetooth address used to preserve this Mac during
+        // automatic swaps.
+        var localBluetoothAddress: String? = nil
 
         var autoOffOption: AutoPowerOffOption = .off
         var statusDescription: String = "Disconnected"
@@ -86,6 +133,14 @@ final class HeadphonesController {
     // General-setting slots are firmware-defined. Discover the slot by the
     // capability subject ("MULTIPOINT_SETTING") rather than assuming D2.
     private var multipointGsSlot: UInt8? = nil
+
+    private struct PendingMultipointSwap {
+        let disconnectAddress: String
+        let connectAddress: String
+    }
+
+    private var pendingMultipointSwap: PendingMultipointSwap?
+    private var multipointSwapTimeoutWorkItem: DispatchWorkItem?
 
     // Sony MDR V1 opcodes (from JADX decompile of Sony Headphones Connect
     // 9.3.0, package com.sony.songpal.tandemfamily.message.mdr.v1.table1).
@@ -176,6 +231,17 @@ final class HeadphonesController {
         static let pairingDeviceManagementInquiryType: UInt8 = 0x02
         static let connectivityDisconnect: UInt8 = 0x00
         static let connectivityConnect: UInt8 = 0x01
+
+        // V2 Table 2 PERI_*_STATUS.
+        static let peripheralGetStatus: UInt8 = 0x32
+        static let peripheralRetStatus: UInt8 = 0x33
+        static let peripheralSetStatus: UInt8 = 0x34
+        static let peripheralNotifyStatus: UInt8 = 0x35
+
+        // Pairing-device-management status values.
+        static let bluetoothNormalMode: UInt8 = 0x00
+        static let bluetoothInquiryScanMode: UInt8 = 0x01
+        static let enable: UInt8 = 0x00
         static let ncasmGet: UInt8 = 0x66        // 66 <t>       -> RET 67 <t> 01 <effect> <type> <voice> <level>
         static let ncasmRet: UInt8 = 0x67
         static let ncasmSet: UInt8 = 0x68        // 68 <t> 01 <effect> <type> <voice> <level>
@@ -186,9 +252,10 @@ final class HeadphonesController {
         // Replies may carry 0x15, 0x17 or 0x22 regardless.
         static let ncasmInquiredTypeBasic: UInt8 = 0x15
         static let ncasmInquiredTypeAsc2: UInt8 = 0x17
-        static let ncasmReplyTypes: Set<UInt8> = [0x15, 0x17, 0x22]
+        static let ncasmReplyTypes: Set<UInt8> = [0x15, 0x17, 0x19, 0x22]
         static let ncasmTypeNoiseCancelling: UInt8 = 0x00
         static let ncasmTypeAmbientSound: UInt8 = 0x01
+        static let ncasmAutoAmbientInquiredType: UInt8 = 0x19
         static let eqGet: UInt8 = 0x56           // 56 00        -> RET 57 00 <preset> 06 <6 bands>
         static let eqRet: UInt8 = 0x57
         static let eqSet: UInt8 = 0x58           // 58 00 <preset> 00  |  58 00 A0 06 <6 bands>
@@ -235,6 +302,18 @@ final class HeadphonesController {
         static let btnModeSet: UInt8 = 0xF8      // F8 0C <0=on/1=off> 01
         static let btnModeNotify: UInt8 = 0xF9   // F9 0C <0=on/1=off> 01
         static let subSpeakToChat: UInt8 = 0x0C
+        static let audioGet: UInt8 = 0xE6
+        static let audioRet: UInt8 = 0xE7
+        static let audioSet: UInt8 = 0xE8
+        static let audioNotify: UInt8 = 0xE9
+        static let audioBgmType: UInt8 = 0x09
+        static let audioCinemaType: UInt8 = 0x04
+        static let speakConfigGet: UInt8 = 0xFA
+        static let speakConfigRet: UInt8 = 0xFB
+        static let speakConfigSet: UInt8 = 0xFC
+        static let speakConfigNotify: UInt8 = 0xFD
+        static let speakConfigType: UInt8 = 0x0C
+        static let pauseWhenTakenOffType: UInt8 = 0x01
     }
 
     private var protocolVersion: SonyProtocolVersion = .v1
@@ -524,6 +603,223 @@ final class HeadphonesController {
         )
     }
 
+    private func normalizeBluetoothAddress(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "-", with: ":")
+            .uppercased()
+    }
+
+    private func currentLocalBluetoothAddress() -> String? {
+        guard let host = IOBluetoothHostController.default(),
+              let raw = host.addressAsString(),
+              !raw.isEmpty else {
+            return nil
+        }
+
+        return normalizeBluetoothAddress(raw)
+    }
+
+    func refreshMultipointManager() {
+        policy.userActivity()
+
+        guard initialized, isV2 else {
+            return
+        }
+
+        if state.multipointDeviceManagementAvailable {
+            sendConnectedDevicesGetV2()
+        }
+
+        if state.pairingModeAvailable {
+            sendPayload(
+                [
+                    V2Opcode.peripheralGetStatus,
+                    V2Opcode.pairingDeviceManagementInquiryType
+                ],
+                dataType: .command2,
+                label: "PAIRING MODE GET"
+            )
+        }
+    }
+
+    func setPairingMode(_ enabled: Bool) {
+        policy.userActivity()
+
+        guard initialized,
+              isV2,
+              state.pairingModeAvailable else {
+            FileLogger.shared.log(
+                "pairing",
+                "PAIRING MODE SET skipped: capability unavailable"
+            )
+            return
+        }
+
+        guard state.pendingPairingMode == nil else {
+            FileLogger.shared.log(
+                "pairing",
+                "PAIRING MODE SET skipped: change already pending"
+            )
+            return
+        }
+
+        if state.pairingMode == enabled {
+            FileLogger.shared.log(
+                "pairing",
+                "PAIRING MODE SET skipped: already \(enabled ? "ON" : "OFF")"
+            )
+            return
+        }
+
+        state.pendingPairingMode = enabled
+
+        // Table 2:
+        //
+        // 34 02 <mode> 00
+        //
+        // 02 = pairing device management with Bluetooth Class of Device
+        // 00 = NORMAL_MODE
+        // 01 = INQUIRY_SCAN_MODE
+        // final 00 = ENABLE
+        let mode: UInt8 = enabled
+            ? V2Opcode.bluetoothInquiryScanMode
+            : V2Opcode.bluetoothNormalMode
+
+        sendPayload(
+            [
+                V2Opcode.peripheralSetStatus,
+                V2Opcode.pairingDeviceManagementInquiryType,
+                mode,
+                V2Opcode.enable
+            ],
+            dataType: .command2,
+            label: "PAIRING MODE \(enabled ? "ON" : "OFF")"
+        )
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            [weak self] in
+
+            guard let self else { return }
+
+            self.sendPayload(
+                [
+                    V2Opcode.peripheralGetStatus,
+                    V2Opcode.pairingDeviceManagementInquiryType
+                ],
+                dataType: .command2,
+                label: "PAIRING MODE GET"
+            )
+        }
+    }
+
+    func swapInMultipointDevice(address: String) {
+        policy.userActivity()
+
+        guard initialized,
+              isV2,
+              state.multipointEnabled == true,
+              state.multipointDeviceManagementAvailable,
+              state.connectedDevicesAreLive else {
+            FileLogger.shared.log(
+                "devices",
+                "MULTIPOINT SWAP skipped: manager unavailable"
+            )
+            return
+        }
+
+        guard pendingMultipointSwap == nil else {
+            FileLogger.shared.log(
+                "devices",
+                "MULTIPOINT SWAP skipped: another swap is in progress"
+            )
+            return
+        }
+
+        guard let target = state.connectedDevices.first(where: {
+            $0.address.caseInsensitiveCompare(address) == .orderedSame
+        }),
+        !target.isConnected else {
+            FileLogger.shared.log(
+                "devices",
+                "MULTIPOINT SWAP skipped: target must be a disconnected known device"
+            )
+            return
+        }
+
+        let connected = state.connectedDevices.filter {
+            $0.isConnected
+        }
+
+        guard connected.count == 2 else {
+            FileLogger.shared.log(
+                "devices",
+                "MULTIPOINT SWAP skipped: exactly 2 devices must already be connected"
+            )
+            return
+        }
+
+        guard let localAddress = currentLocalBluetoothAddress() else {
+            FileLogger.shared.log(
+                "devices",
+                "MULTIPOINT SWAP skipped: local Mac Bluetooth address unavailable"
+            )
+            return
+        }
+
+        state.localBluetoothAddress = localAddress
+
+        guard connected.contains(where: {
+            normalizeBluetoothAddress($0.address) == localAddress
+        }) else {
+            FileLogger.shared.log(
+                "devices",
+                "MULTIPOINT SWAP skipped: this Mac was not found in Sony device list"
+            )
+            return
+        }
+
+        // Preserve this Mac so SonyConnect retains its control path.
+        guard let outgoing = connected.first(where: {
+            normalizeBluetoothAddress($0.address) != localAddress
+        }) else {
+            FileLogger.shared.log(
+                "devices",
+                "MULTIPOINT SWAP skipped: no non-Mac connected device found"
+            )
+            return
+        }
+
+        pendingMultipointSwap = PendingMultipointSwap(
+            disconnectAddress: outgoing.address,
+            connectAddress: target.address
+        )
+
+        state.multipointSwapInProgress = true
+
+        multipointSwapTimeoutWorkItem?.cancel()
+        let timeout = DispatchWorkItem { [weak self] in
+            guard let self, self.pendingMultipointSwap != nil else { return }
+            FileLogger.shared.log("devices", "multipoint swap timed out; clearing operation")
+            self.pendingMultipointSwap = nil
+            self.state.multipointSwapInProgress = false
+            self.sendConnectedDevicesGetV2()
+        }
+        multipointSwapTimeoutWorkItem = timeout
+        DispatchQueue.main.asyncAfter(deadline: .now() + 12, execute: timeout)
+
+        FileLogger.shared.log(
+            "devices",
+            "multipoint swap: \(outgoing.name) -> \(target.name)"
+        )
+
+        // Phase 1. Phase 2 begins only after Sony returns a successful
+        // DISCONNECT result.
+        setMultipointDeviceConnected(
+            false,
+            address: outgoing.address
+        )
+    }
+
     func setMultipointDeviceConnected(_ connected: Bool, address: String) {
         policy.userActivity()
 
@@ -595,6 +891,7 @@ final class HeadphonesController {
     }
 
     private func resetSessionState() {
+        finishMultipointSwap()
         initialized = false
         awaitingInitResponse = false
         outgoingSequence = 0
@@ -612,6 +909,19 @@ final class HeadphonesController {
         ncSettingType = 0x02
         asmSettingType = 0x01
         asmId = 0x00
+        state.pauseWhenTakenOff = nil
+        state.listeningMode = .standard
+        state.bgmRoomSize = nil
+        state.speakToChatSensitivity = nil
+        state.speakToChatTimeout = nil
+        state.pauseWhenTakenOffAvailable = false
+        state.speakToChatConfigAvailable = false
+        state.listeningModesAvailable = false
+        state.bgmModeAvailable = false
+        state.cinemaModeAvailable = false
+        state.autoAmbientSoundAvailable = false
+        state.autoAmbientSoundEnabled = nil
+        state.autoAmbientSensitivity = .standard
     }
 
     func toggleTouchSensor() {
@@ -671,6 +981,26 @@ final class HeadphonesController {
         }
     }
 
+    func setAutoAmbientSound(_ enabled: Bool) {
+        policy.userActivity()
+        guard initialized, isV2, state.autoAmbientSoundAvailable else { return }
+        state.autoAmbientSoundEnabled = enabled
+        sendNcasmAutoAmbientSet()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            self?.sendNcasmAutoAmbientGet()
+        }
+    }
+
+    func setAutoAmbientSensitivity(_ sensitivity: AutoAmbientSensitivity) {
+        policy.userActivity()
+        guard initialized, isV2, state.autoAmbientSoundAvailable else { return }
+        state.autoAmbientSensitivity = sensitivity
+        sendNcasmAutoAmbientSet()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            self?.sendNcasmAutoAmbientGet()
+        }
+    }
+
     func toggleSpeakToChat() {
         policy.userActivity()
         guard initialized else { return }
@@ -680,6 +1010,83 @@ final class HeadphonesController {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
             self?.sendSpeakToChatGet()
         }
+    }
+
+    func setPauseWhenTakenOff(_ enabled: Bool) {
+        policy.userActivity()
+        guard initialized, isV2, state.pauseWhenTakenOffAvailable else { return }
+        sendPayload([
+            V2Opcode.btnModeSet,
+            V2Opcode.pauseWhenTakenOffType,
+            enabled ? 0x00 : 0x01
+        ], label: "PAUSE WHEN TAKEN OFF SET=\(enabled ? "ON" : "OFF")")
+        state.pauseWhenTakenOff = enabled
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            self?.sendPayload([V2Opcode.btnModeGet, V2Opcode.pauseWhenTakenOffType],
+                              label: "PAUSE WHEN TAKEN OFF GET")
+        }
+    }
+
+    func setListeningMode(_ mode: ListeningMode) {
+        policy.userActivity()
+        guard initialized, isV2, state.listeningModesAvailable else { return }
+        let roomSize = state.bgmRoomSize ?? 0x00
+        sendPayload([
+            V2Opcode.audioSet, V2Opcode.audioBgmType,
+            mode == .backgroundMusic ? 0x00 : 0x01, roomSize
+        ], label: "LISTENING MODE BGM=\(mode == .backgroundMusic ? "ON" : "OFF")")
+        sendPayload([
+            V2Opcode.audioSet, V2Opcode.audioCinemaType,
+            mode == .cinema ? 0x00 : 0x01
+        ], label: "LISTENING MODE CINEMA=\(mode == .cinema ? "ON" : "OFF")")
+        state.listeningMode = mode
+        queryListeningSettings()
+    }
+
+    func setBgmRoomSize(_ roomSize: UInt8) {
+        policy.userActivity()
+        guard initialized, isV2, state.bgmModeAvailable else { return }
+        let size = min(roomSize, 0x02)
+        sendPayload([
+            V2Opcode.audioSet, V2Opcode.audioBgmType, 0x00, size
+        ], label: "BGM ROOM SET=\(size)")
+        state.bgmRoomSize = size
+        state.listeningMode = .backgroundMusic
+        queryListeningSettings()
+    }
+
+    func setSpeakToChatConfiguration(sensitivity: UInt8, timeout: UInt8) {
+        policy.userActivity()
+        guard initialized, isV2, state.speakToChatConfigAvailable else { return }
+        sendPayload([
+            V2Opcode.speakConfigSet, V2Opcode.speakConfigType,
+            sensitivity, timeout
+        ], label: "SPEAK TO CHAT CONFIG SET")
+        state.speakToChatSensitivity = sensitivity
+        state.speakToChatTimeout = timeout
+    }
+
+    private func queryListeningSettings() {
+        guard isV2 else { return }
+        if state.bgmModeAvailable {
+            sendPayload([V2Opcode.audioGet, V2Opcode.audioBgmType], label: "BGM MODE GET")
+        }
+        if state.cinemaModeAvailable {
+            sendPayload([V2Opcode.audioGet, V2Opcode.audioCinemaType], label: "CINEMA MODE GET")
+        }
+    }
+
+    private func queryDiscoveredSettings() {
+        guard isV2 else { return }
+        if state.pauseWhenTakenOffAvailable {
+            sendPayload([V2Opcode.btnModeGet, V2Opcode.pauseWhenTakenOffType],
+                        label: "PAUSE WHEN TAKEN OFF GET")
+        }
+        if state.speakToChatConfigAvailable {
+            sendPayload([V2Opcode.speakConfigGet, V2Opcode.speakConfigType],
+                        label: "SPEAK TO CHAT CONFIG GET")
+        }
+        queryListeningSettings()
     }
 
     func setEqPreset(_ id: UInt8) {
@@ -781,6 +1188,33 @@ final class HeadphonesController {
     }
 
     // v2 layout: 68 17 01 <effect> <0=NC / 1=Ambient> <focusOnVoice> <level>
+    private func sendNcasmAutoAmbientGet() {
+        sendPayload(
+            [V2Opcode.ncasmGet, V2Opcode.ncasmAutoAmbientInquiredType],
+            label: "NCASM AUTO AMBIENT GET (v2)"
+        )
+    }
+
+    private func sendNcasmAutoAmbientSet() {
+        guard isV2, state.autoAmbientSoundAvailable else { return }
+        let ambient = state.ncMode == .ambient
+        let level = UInt8(clamping: max(1, currentAmbientLevel))
+        sendPayload(
+            [
+                V2Opcode.ncasmSet,
+                V2Opcode.ncasmAutoAmbientInquiredType,
+                0x01,
+                ambient ? 0x01 : 0x00,
+                ambient ? V2Opcode.ncasmTypeAmbientSound : V2Opcode.ncasmTypeNoiseCancelling,
+                asmId,
+                level,
+                state.autoAmbientSoundEnabled == true ? 0x01 : 0x00,
+                state.autoAmbientSensitivity.rawValue
+            ],
+            label: "NCASM AUTO AMBIENT SET=\(state.autoAmbientSoundEnabled == true ? "ON" : "OFF") sensitivity=\(state.autoAmbientSensitivity.label)"
+        )
+    }
+
     private func sendNcasmSetV2(mode: NCMode) {
         let effect: UInt8 = (mode == .off) ? 0x00 : 0x01
         let type: UInt8 = (mode == .ambient) ? V2Opcode.ncasmTypeAmbientSound
@@ -921,6 +1355,11 @@ final class HeadphonesController {
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
             self?.sendNcasmGet()
+        }
+        if isV2 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { [weak self] in
+                self?.sendNcasmAutoAmbientGet()
+            }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.7) { [weak self] in
             self?.sendSpeakToChatGet()
@@ -1130,6 +1569,16 @@ final class HeadphonesController {
 
         if table == 1 {
             state.v2Table1Features = features
+            state.pauseWhenTakenOffAvailable =
+                features.contains(0xF1) || features.contains(0xF6) || features.contains(0x25)
+            // XM6 firmware exposes these controls through the audio family;
+            // some firmware builds omit the individual IDs from the support
+            // table even though the commands are available.
+            state.bgmModeAvailable = features.contains(0xE4) || state.isWH1000XM6
+            state.cinemaModeAvailable = features.contains(0xE5) || state.isWH1000XM6
+            state.listeningModesAvailable =
+                state.isWH1000XM6 || state.bgmModeAvailable || state.cinemaModeAvailable || features.contains(0xE6)
+            state.speakToChatConfigAvailable = features.contains(0xFC)
 
             if features.contains(0x90) {
                 sendPayload(
@@ -1139,6 +1588,7 @@ final class HeadphonesController {
             }
 
             requestAdvertisedGeneralSettingCapabilities()
+            queryDiscoveredSettings()
         } else {
             state.v2Table2Features = features
 
@@ -1148,6 +1598,27 @@ final class HeadphonesController {
                 features.contains(0x30) ||
                 features.contains(0x32) ||
                 features.contains(0x33)
+
+
+            state.pairingModeAvailable =
+                state.multipointDeviceManagementAvailable
+
+            state.localBluetoothAddress =
+                currentLocalBluetoothAddress()
+
+            if state.pairingModeAvailable {
+                sendPayload(
+                    [
+                        V2Opcode.peripheralGetStatus,
+                        V2Opcode.pairingDeviceManagementInquiryType
+                    ],
+                    dataType: .command2,
+                    label: "PAIRING MODE GET"
+                )
+            } else {
+                state.pairingMode = nil
+                state.pendingPairingMode = nil
+            }
         }
 
         FileLogger.shared.log(
@@ -1285,6 +1756,10 @@ final class HeadphonesController {
             switch opcode {
             case V2Opcode.supportFunctionRet:
                 parseV2SupportFunctions(packet.payload, table: 2)
+
+            case V2Opcode.peripheralRetStatus,
+                 V2Opcode.peripheralNotifyStatus:
+                parsePairingModeStatusV2(packet.payload)
 
             case V2Opcode.connectedDevicesRet, V2Opcode.connectedDevicesNotify:
                 parseConnectedDevicesV2(packet.payload)
@@ -1430,6 +1905,10 @@ final class HeadphonesController {
             parseEqParamV2(packet.payload)
         case V2Opcode.btnModeRet, V2Opcode.btnModeNotify:
             parseBtnModeV2(packet.payload)
+        case V2Opcode.audioRet, V2Opcode.audioNotify:
+            parseAudioV2(packet.payload)
+        case V2Opcode.speakConfigRet, V2Opcode.speakConfigNotify:
+            parseSpeakConfigV2(packet.payload)
         case V2Opcode.apoRet, V2Opcode.apoNotify:
             parseAutoPowerOffV2(packet.payload)
         case Opcode.gsRetCapability:
@@ -1550,6 +2029,11 @@ final class HeadphonesController {
 
         if state.pendingMultipointEnabled == enabled {
             state.pendingMultipointEnabled = nil
+        state.pendingPairingMode = nil
+        state.pairingMode = nil
+        state.multipointSwapInProgress = false
+        state.localBluetoothAddress = nil
+        pendingMultipointSwap = nil
 
             FileLogger.shared.log(
                 "state",
@@ -1560,6 +2044,34 @@ final class HeadphonesController {
         FileLogger.shared.log(
             "state",
             "Multipoint = \(enabled ? "ON" : "OFF")"
+        )
+    }
+
+    private func parsePairingModeStatusV2(_ payload: [UInt8]) {
+        guard payload.count == 4,
+              payload[0] == V2Opcode.peripheralRetStatus ||
+                payload[0] == V2Opcode.peripheralNotifyStatus,
+              payload[1] ==
+                V2Opcode.pairingDeviceManagementInquiryType else {
+            return
+        }
+
+        let mode = payload[2]
+        let enabledStatus = payload[3]
+
+        let active =
+            enabledStatus == V2Opcode.enable &&
+            mode == V2Opcode.bluetoothInquiryScanMode
+
+        state.pairingMode = active
+
+        if state.pendingPairingMode == active {
+            state.pendingPairingMode = nil
+        }
+
+        FileLogger.shared.log(
+            "pairing",
+            "Pairing Mode = \(active ? "ON" : "OFF")"
         )
     }
 
@@ -1623,11 +2135,96 @@ final class HeadphonesController {
             "multipoint \(actionName) \(resultDescription): \(targetName)"
         )
 
+        if let swap = pendingMultipointSwap {
+            let resultAddress =
+                normalizeBluetoothAddress(address)
+
+            let disconnectAddress =
+                normalizeBluetoothAddress(
+                    swap.disconnectAddress
+                )
+
+            let connectAddress =
+                normalizeBluetoothAddress(
+                    swap.connectAddress
+                )
+
+            if action == V2Opcode.connectivityDisconnect &&
+                resultAddress == disconnectAddress {
+
+                switch result {
+                case 0x00:
+                    FileLogger.shared.log(
+                        "devices",
+                        "multipoint swap phase 1 complete; connecting replacement"
+                    )
+
+                    DispatchQueue.main.asyncAfter(
+                        deadline: .now() + 0.3
+                    ) { [weak self] in
+
+                        guard let self,
+                              let swap =
+                                self.pendingMultipointSwap else {
+                            return
+                        }
+
+                        self.setMultipointDeviceConnected(
+                            true,
+                            address: swap.connectAddress
+                        )
+                    }
+
+                case 0x01, 0x03:
+                    FileLogger.shared.log(
+                        "devices",
+                        "multipoint swap failed while disconnecting old device"
+                    )
+                    finishMultipointSwap()
+
+                default:
+                    // 0x02 = in progress
+                    break
+                }
+            }
+
+            if action == V2Opcode.connectivityConnect &&
+                resultAddress == connectAddress {
+
+                switch result {
+                case 0x10:
+                    FileLogger.shared.log(
+                        "devices",
+                        "multipoint swap success"
+                    )
+                    finishMultipointSwap()
+
+                case 0x11, 0x13:
+                    FileLogger.shared.log(
+                        "devices",
+                        "multipoint swap failed while connecting replacement"
+                    )
+                    finishMultipointSwap()
+
+                default:
+                    // 0x12 = in progress
+                    break
+                }
+            }
+        }
+
         if result == 0x00 || result == 0x10 {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
                 self?.sendConnectedDevicesGetV2()
             }
         }
+    }
+
+    private func finishMultipointSwap() {
+        multipointSwapTimeoutWorkItem?.cancel()
+        multipointSwapTimeoutWorkItem = nil
+        pendingMultipointSwap = nil
+        state.multipointSwapInProgress = false
     }
 
     private func parseSourceSwitchNotifyV2(_ payload: [UInt8]) {
@@ -1872,6 +2469,19 @@ final class HeadphonesController {
     private func parseNcasmV2(_ payload: [UInt8]) {
         // RET / NOTIFY: 67 17 01 <effect> <0=NC / 1=Ambient> <focusOnVoice> <level>
         guard payload.count >= 7, V2Opcode.ncasmReplyTypes.contains(payload[1]) else { return }
+        if payload[1] == V2Opcode.ncasmAutoAmbientInquiredType {
+            guard payload.count >= 9 else { return }
+            state.autoAmbientSoundAvailable = true
+            state.autoAmbientSoundEnabled = payload[7] != 0
+            if let sensitivity = AutoAmbientSensitivity(rawValue: payload[8]) {
+                state.autoAmbientSensitivity = sensitivity
+            }
+            FileLogger.shared.log(
+                "state",
+                "Auto Ambient v2 = \(state.autoAmbientSoundEnabled == true ? "ON" : "OFF") sensitivity=\(state.autoAmbientSensitivity.label)"
+            )
+            return
+        }
         let on = payload[3] != 0
         let ambient = payload[4] != 0
         let voice = payload[5] != 0
@@ -1926,10 +2536,39 @@ final class HeadphonesController {
         // RET: F7 <sub> <value...>. For Speak-to-Chat the value byte mirrors
         // the SET encoding, where 0x00 means enabled. Inferred from the SET
         // layout — unverified against hardware.
-        guard payload.count >= 3, payload[1] == V2Opcode.subSpeakToChat else { return }
+        guard payload.count >= 3 else { return }
         let enabled = payload[2] == 0x00
-        state.speakToChatEnabled = enabled
-        FileLogger.shared.log("state", "SpeakToChat v2 = \(enabled ? "ON" : "OFF")")
+        if payload[1] == V2Opcode.subSpeakToChat {
+            state.speakToChatEnabled = enabled
+            FileLogger.shared.log("state", "SpeakToChat v2 = \(enabled ? "ON" : "OFF")")
+        } else if payload[1] == V2Opcode.pauseWhenTakenOffType {
+            state.pauseWhenTakenOff = enabled
+            FileLogger.shared.log("state", "Pause when taken off v2 = \(enabled ? "ON" : "OFF")")
+        }
+    }
+
+    private func parseAudioV2(_ payload: [UInt8]) {
+        guard payload.count >= 3 else { return }
+        let enabled = payload[2] == 0x00
+        switch payload[1] {
+        case V2Opcode.audioBgmType:
+            state.bgmRoomSize = payload.count > 3 ? payload[3] : state.bgmRoomSize
+            if enabled { state.listeningMode = .backgroundMusic }
+            else if state.listeningMode == .backgroundMusic { state.listeningMode = .standard }
+        case V2Opcode.audioCinemaType:
+            if enabled { state.listeningMode = .cinema }
+            else if state.listeningMode == .cinema { state.listeningMode = .standard }
+        default:
+            return
+        }
+        FileLogger.shared.log("state", "Listening mode = \(state.listeningMode?.rawValue ?? "Standard")")
+    }
+
+    private func parseSpeakConfigV2(_ payload: [UInt8]) {
+        guard payload.count >= 4, payload[1] == V2Opcode.speakConfigType else { return }
+        state.speakToChatSensitivity = payload[2]
+        state.speakToChatTimeout = payload[3]
+        FileLogger.shared.log("state", "SpeakToChat config sensitivity=\(payload[2]) timeout=\(payload[3])")
     }
 
     private func parseNcasm(_ payload: [UInt8]) {

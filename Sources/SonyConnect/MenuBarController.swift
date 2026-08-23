@@ -1,4 +1,5 @@
 import AppKit
+import UserNotifications
 
 final class MenuBarController: NSObject, NSMenuDelegate {
     private let statusItem: NSStatusItem
@@ -10,6 +11,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let volumeMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let volumeSlider = NSSlider()
     private let volumeController = VolumeController(nameHints: SupportedDevices.nameHints)
+    private var volumeRefreshTimer: Timer?
     private let eqPresetMenuItem = NSMenuItem(title: "Equalizer: —", action: nil, keyEquivalent: "")
     private let eqPresetSubmenu = NSMenu(title: "Equalizer")
     private let eqPresetListItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
@@ -19,15 +21,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let eqView = EqualizerView()
 
     private let multipointMenuItem = NSMenuItem(
-        title: "Multipoint",
+        title: "",
         action: nil,
         keyEquivalent: ""
     )
-    private let multipointSubmenu = NSMenu(title: "Multipoint")
-    private var multipointButtons: [String: NSButton] = [:]
-    private var multipointConnectionButtons: [String: NSButton] = [:]
-    private let multipointEnabledButton = NSButton()
-    private var multipointLayoutSignature = ""
+    private let multipointManagerView = MultipointMenuView()
 
     private let touchMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let touchButton = NSButton()
@@ -39,6 +37,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let ncOnButton = NSButton()
     private let ncAmbientButton = NSButton()
     private let ncOffButton = NSButton()
+    private let autoAmbientMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let autoAmbientButton = NSButton()
+    private let autoAmbientSensitivityMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let autoAmbientSensitivityButton = NSButton()
     private let ambientSettingsMenuItem = NSMenuItem(title: "Ambient Sound Settings", action: nil, keyEquivalent: "")
     private let ambientSettingsSubmenu = NSMenu(title: "Ambient Sound Settings")
     private let ambientLevelMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
@@ -47,7 +49,30 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let focusOnVoiceButton = NSButton()
 
     private let speakToChatMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let speakToChatSubmenu = NSMenu(title: "Speak-to-Chat")
     private let speakToChatButton = NSButton()
+    private let speakSensitivityMenuItem = NSMenuItem(title: "Sensitivity: —", action: nil, keyEquivalent: "")
+    private let speakTimeoutMenuItem = NSMenuItem(title: "Resume after: —", action: nil, keyEquivalent: "")
+    private let speakSensitivityButton = NSButton()
+    private let speakTimeoutButton = NSButton()
+    private let speakParentMenuItem = NSMenuItem(title: "Speak-to-Chat", action: nil, keyEquivalent: "")
+
+    private let wearingMenuItem = NSMenuItem(title: "Wearing Detection", action: nil, keyEquivalent: "")
+    private let pauseWhenTakenOffMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let pauseWhenTakenOffButton = NSButton()
+
+    private let listeningModesMenuItem = NSMenuItem(title: "Listening Mode", action: nil, keyEquivalent: "")
+    private let listeningModesSubmenu = NSMenu(title: "Listening Mode")
+    private let listeningModeContentItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let standardListeningItem = NSMenuItem(title: "Standard", action: nil, keyEquivalent: "")
+    private let backgroundMusicListeningItem = NSMenuItem(title: "Background Music", action: nil, keyEquivalent: "")
+    private let cinemaListeningItem = NSMenuItem(title: "Cinema", action: nil, keyEquivalent: "")
+    private let bgmRoomSizeMenuItem = NSMenuItem(title: "Background Music Room", action: nil, keyEquivalent: "")
+    private let bgmRoomSizeSubmenu = NSMenu(title: "Background Music Room")
+    private let myRoomButton = NSButton()
+    private let livingRoomButton = NSButton()
+    private let cafeButton = NSButton()
+    private let listeningModeView = ListeningModeMenuView()
 
     private let autoOffMenuItem = NSMenuItem(title: "Auto Power Off", action: nil, keyEquivalent: "")
     private let autoOffSubmenu = NSMenu(title: "Auto Power Off")
@@ -63,15 +88,38 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let launchAtLogin = LaunchAtLoginManager()
     private var hasRestoredMenuAccess = true
     private var recoveryHideWorkItem: DispatchWorkItem?
+    private var noiseCancellingSubmenuIsOpen = false
+    private var lastBatteryLevel: Int?
+    private var lastBatteryCharging: Bool?
 
     override init() {
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        // Without an autosaveName, macOS doesn't remember a dragged position
-        // across the item disappearing and reappearing (isVisible toggling
-        // below) — it just re-inserts wherever. This keys the position to a
-        // stable name so a manual drag sticks across connect/disconnect.
-        statusItem.autosaveName = "SonyConnectStatusItem"
+        // Do not assign autosaveName here. On recent macOS versions,
+        // persisted status-item placement/visibility state can survive outside
+        // the application's ordinary defaults and leave an otherwise healthy
+        // status item invisible after relaunch/reinstall.
+        //
+        // Start with a compact variable-width item so macOS can place it
+        // beside the notch and other menu extras. The render path keeps this
+        // compact width for the icon-only state and expands it for battery text.
+        statusItem = NSStatusBar.system.statusItem(
+            withLength: NSStatusItem.variableLength
+        )
+
         super.init()
+
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert]) { granted, error in
+            if let error {
+                FileLogger.shared.log("notifications", "battery notification permission error: \(error.localizedDescription)")
+            } else {
+                FileLogger.shared.log("notifications", "battery notifications authorized=\(granted)")
+            }
+        }
+
+        // Establish a visible status item before any asynchronous Sony state
+        // arrives. User preference handling in render() may hide it later only
+        // when Hide Icon When Disconnected is actually enabled.
+        statusItem.isVisible = true
+
         configureStatusButton()
         configureMenu()
         updateLaunchAtLoginMenuItem()
@@ -99,7 +147,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             button.title = ""
         } else {
             button.image = nil
-            button.title = "🎧"
+            button.title = "SC"
         }
     }
 
@@ -133,18 +181,18 @@ final class MenuBarController: NSObject, NSMenuDelegate {
                 // ordinary disconnected/idle presentation as a square icon.
                 button.imagePosition = .imageOnly
                 button.title = ""
-                statusItem.length = NSStatusItem.squareLength
+                statusItem.length = NSStatusItem.variableLength
             }
         } else {
             button.image = nil
             button.imagePosition = .noImage
 
             if let batteryText {
-                button.title = "🎧 \(batteryText)"
+                button.title = "SC \(batteryText)"
                 statusItem.length = NSStatusItem.variableLength
             } else {
-                button.title = "🎧"
-                statusItem.length = NSStatusItem.squareLength
+                button.title = "SC"
+                statusItem.length = NSStatusItem.variableLength
             }
         }
 
@@ -156,9 +204,14 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     private func configureStatusButton() {
         guard let button = statusItem.button else { return }
+
+        button.isHidden = false
+        button.alphaValue = 1.0
+        button.isEnabled = true
         button.target = self
         button.action = #selector(handleClick(_:))
         button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+
         applyIcon()
     }
 
@@ -187,7 +240,102 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         eqView.onBandsChanged = { [weak self] bands in self?.controller.setEqBands(bands) }
         eqBandsMenuItem.view = eqView
 
-        multipointMenuItem.submenu = multipointSubmenu
+        multipointMenuItem.view = multipointManagerView
+
+        multipointManagerView.onToggleMultipoint = {
+            [weak self] enabled in
+
+            guard let self else { return }
+
+            self.controller.setMultipointEnabled(enabled)
+            self.multipointManagerView.render(
+                state: self.controller.state
+            )
+        }
+
+        multipointManagerView.onPlayback = {
+            [weak self] address in
+
+            guard let self else { return }
+
+            self.controller.switchMultipointPlayback(
+                to: address
+            )
+
+            self.multipointManagerView.render(
+                state: self.controller.state
+            )
+        }
+
+        multipointManagerView.onConnect = {
+            [weak self] address in
+
+            guard let self else { return }
+
+            self.controller.setMultipointDeviceConnected(
+                true,
+                address: address
+            )
+
+            self.multipointManagerView.render(
+                state: self.controller.state
+            )
+        }
+
+        multipointManagerView.onDisconnect = {
+            [weak self] address in
+
+            guard let self else { return }
+
+            self.controller.setMultipointDeviceConnected(
+                false,
+                address: address
+            )
+
+            self.multipointManagerView.render(
+                state: self.controller.state
+            )
+        }
+
+        multipointManagerView.onSwap = {
+            [weak self] address in
+
+            guard let self else { return }
+
+            self.controller.swapInMultipointDevice(
+                address: address
+            )
+
+            self.multipointManagerView.render(
+                state: self.controller.state
+            )
+        }
+
+        multipointManagerView.onTogglePairing = {
+            [weak self] in
+
+            guard let self else { return }
+
+            self.controller.setPairingMode(
+                self.controller.state.pairingMode != true
+            )
+
+            self.multipointManagerView.render(
+                state: self.controller.state
+            )
+        }
+
+        multipointManagerView.onRefresh = {
+            [weak self] in
+
+            guard let self else { return }
+
+            self.controller.refreshMultipointManager()
+
+            self.multipointManagerView.render(
+                state: self.controller.state
+            )
+        }
         multipointMenuItem.isHidden = true
         popupMenu.addItem(multipointMenuItem)
 
@@ -205,6 +353,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         // Noise Cancelling submenu. Custom radio-button views keep the
         // submenu open while modes are changed.
         let ncSubmenu = NSMenu(title: "Noise Cancelling")
+        ncSubmenu.delegate = self
 
         configurePersistentButton(
             ncOnButton,
@@ -235,11 +384,23 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
         ncSubmenu.addItem(ncOnItem)
         ncSubmenu.addItem(ncAmbientItem)
-        ncSubmenu.addItem(ncOffItem)
-        ncSubmenu.addItem(.separator())
+        configurePersistentButton(
+            autoAmbientButton,
+            in: autoAmbientMenuItem,
+            title: "Auto Ambient Sound",
+            type: .switch,
+            action: #selector(toggleAutoAmbientButton(_:))
+        )
+        configurePersistentButton(
+            autoAmbientSensitivityButton,
+            in: autoAmbientSensitivityMenuItem,
+            title: "Sensitivity: Standard",
+            type: .momentaryPushIn,
+            action: #selector(cycleAutoAmbientSensitivity(_:)),
+            leftInset: 48
+        )
         configureAmbientLevelItem()
-        ambientSettingsSubmenu.addItem(ambientLevelMenuItem)
-        ambientSettingsSubmenu.addItem(.separator())
+        ncSubmenu.addItem(ambientLevelMenuItem)
         configurePersistentButton(
             focusOnVoiceButton,
             in: focusOnVoiceMenuItem,
@@ -247,12 +408,13 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             type: .switch,
             action: #selector(toggleFocusOnVoiceButton(_:))
         )
-        ambientSettingsSubmenu.addItem(focusOnVoiceMenuItem)
-        ambientSettingsMenuItem.submenu = ambientSettingsSubmenu
-        ncSubmenu.addItem(ambientSettingsMenuItem)
+        ncSubmenu.addItem(focusOnVoiceMenuItem)
+        ncSubmenu.addItem(ncOffItem)
 
         ncParentMenuItem.submenu = ncSubmenu
         popupMenu.addItem(ncParentMenuItem)
+        popupMenu.addItem(autoAmbientMenuItem)
+        popupMenu.addItem(autoAmbientSensitivityMenuItem)
 
         configurePersistentButton(
             speakToChatButton,
@@ -261,7 +423,50 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             type: .switch,
             action: #selector(toggleSpeakToChatButton(_:))
         )
-        popupMenu.addItem(speakToChatMenuItem)
+        speakToChatSubmenu.addItem(speakToChatMenuItem)
+        speakToChatSubmenu.addItem(.separator())
+        configurePersistentButton(
+            speakSensitivityButton,
+            in: speakSensitivityMenuItem,
+            title: "Sensitivity: —",
+            type: .momentaryPushIn,
+            action: #selector(cycleSpeakSensitivity(_:))
+        )
+        configurePersistentButton(
+            speakTimeoutButton,
+            in: speakTimeoutMenuItem,
+            title: "Resume after: —",
+            type: .momentaryPushIn,
+            action: #selector(cycleSpeakTimeout(_:))
+        )
+        speakToChatSubmenu.addItem(speakSensitivityMenuItem)
+        speakToChatSubmenu.addItem(speakTimeoutMenuItem)
+        speakParentMenuItem.submenu = speakToChatSubmenu
+        popupMenu.addItem(speakParentMenuItem)
+
+        configurePersistentButton(
+            pauseWhenTakenOffButton,
+            in: wearingMenuItem,
+            title: "Wearing Detection",
+            type: .switch,
+            action: #selector(togglePauseWhenTakenOff(_:))
+        )
+        // This is a single setting, so keep it directly clickable while using
+        // a custom button to keep the menu open after the toggle.
+        popupMenu.addItem(wearingMenuItem)
+
+        listeningModeView.setShowsHeader(false)
+        listeningModeContentItem.view = listeningModeView
+        listeningModesSubmenu.addItem(listeningModeContentItem)
+        listeningModesMenuItem.submenu = listeningModesSubmenu
+        popupMenu.addItem(listeningModesMenuItem)
+
+        listeningModeView.onModeChanged = { [weak self] mode in
+            self?.controller.setListeningMode(mode)
+        }
+        listeningModeView.onRoomChanged = { [weak self] room in
+            self?.controller.setBgmRoomSize(room)
+        }
 
         popupMenu.addItem(.separator())
 
@@ -298,10 +503,54 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         openLogMenuItem.action = #selector(openLog)
         popupMenu.addItem(openLogMenuItem)
 
+        let quitMenuItem = NSMenuItem(
+            title: "Quit SonyConnect",
+            action: #selector(NSApplication.terminate(_:)),
+            keyEquivalent: "q"
+        )
+        popupMenu.addItem(quitMenuItem)
+        reorderPopupMenu(quitMenuItem: quitMenuItem)
+    }
+
+    private func reorderPopupMenu(quitMenuItem: NSMenuItem) {
+        popupMenu.removeAllItems()
+
+        let firstGroup = [
+            statusMenuItem,
+            batteryMenuItem,
+            volumeMenuItem,
+            eqPresetMenuItem,
+            multipointMenuItem
+        ]
+        let controlsGroup = [
+            ncParentMenuItem,
+            autoAmbientMenuItem,
+            autoAmbientSensitivityMenuItem,
+            listeningModesMenuItem,
+            speakParentMenuItem,
+            touchMenuItem,
+            wearingMenuItem
+        ]
+        let powerGroup = [
+            autoOffMenuItem,
+            powerOffMenuItem
+        ]
+        let utilityGroup = [
+            reconnectMenuItem,
+            showBatteryMenuItem,
+            hideIconMenuItem,
+            launchAtLoginMenuItem,
+            openLogMenuItem
+        ]
+
+        for (index, group) in [firstGroup, controlsGroup, powerGroup, utilityGroup].enumerated() {
+            if index > 0 {
+                popupMenu.addItem(.separator())
+            }
+            group.forEach { popupMenu.addItem($0) }
+        }
         popupMenu.addItem(.separator())
-        popupMenu.addItem(NSMenuItem(title: "Quit SonyConnect",
-                                     action: #selector(NSApplication.terminate(_:)),
-                                     keyEquivalent: "q"))
+        popupMenu.addItem(quitMenuItem)
     }
 
     private func configurePersistentButton(
@@ -310,7 +559,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         title: String,
         type: NSButton.ButtonType,
         action: Selector,
-        tag: Int = 0
+        tag: Int = 0,
+        leftInset: CGFloat = 12
     ) {
         let width: CGFloat = 230
         let height: CGFloat = 24
@@ -320,13 +570,28 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         )
         container.autoresizingMask = [.width]
 
-        button.frame = NSRect(x: 12, y: 1, width: width - 24, height: 22)
+        button.frame = NSRect(
+            x: leftInset,
+            y: 1,
+            width: width - leftInset - 12,
+            height: 22
+        )
         button.autoresizingMask = [.width]
         button.title = title
-        button.setButtonType(type)
+        // Use a borderless push button for toggles and supply the same
+        // leading checkmark treatment as native NSMenuItems. The switch
+        // button style draws a rounded box, which does not match the rest of
+        // this menu.
+        button.setButtonType(type == .switch ? .pushOnPushOff : type)
         button.bezelStyle = .regularSquare
         button.isBordered = false
         button.alignment = .left
+        if type == .switch {
+            button.imagePosition = .imageLeading
+            button.imageScaling = .scaleProportionallyDown
+            button.contentTintColor = .labelColor
+            button.image = menuCheckmarkImage(checked: false)
+        }
         button.font = .menuFont(ofSize: 0)
         button.target = self
         button.action = action
@@ -334,6 +599,24 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
         container.addSubview(button)
         menuItem.view = container
+    }
+
+    private func menuCheckmarkImage(checked: Bool) -> NSImage {
+        if checked {
+            return NSImage(
+                systemSymbolName: "checkmark",
+                accessibilityDescription: "Enabled"
+            ) ?? NSImage(size: NSSize(width: 16, height: 16))
+        }
+
+        return NSImage(size: NSSize(width: 16, height: 16))
+    }
+
+    private func setMenuCheckmark(
+        _ button: NSButton,
+        checked: Bool
+    ) {
+        button.image = menuCheckmarkImage(checked: checked)
     }
 
     private func configurePersistentActionButton(
@@ -377,7 +660,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         let width: CGFloat = 230
         let height: CGFloat = 26
         let leftInset: CGFloat = 38
-        let rightInset: CGFloat = 14
+        let sliderWidth: CGFloat = 300
         let container = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
         // NSMenu stretches a custom item view to the menu's content width
         // when its autoresizing mask is flexible-width.
@@ -390,16 +673,28 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         icon.autoresizingMask = [.maxXMargin]   // pinned to the left
         container.addSubview(icon)
 
-        volumeSlider.frame = NSRect(x: leftInset, y: 3,
-                                    width: width - leftInset - rightInset, height: 20)
-        // Fixed left/right margins, flexible width → grows with the menu.
-        volumeSlider.autoresizingMask = [.width]
+        // Use explicit constraints so AppKit cannot stretch the track to the
+        // full width of the surrounding menu.
+        volumeSlider.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(volumeSlider)
+        NSLayoutConstraint.activate([
+            volumeSlider.leadingAnchor.constraint(
+                equalTo: container.leadingAnchor,
+                constant: leftInset
+            ),
+            volumeSlider.centerYAnchor.constraint(
+                equalTo: container.centerYAnchor
+            ),
+            volumeSlider.widthAnchor.constraint(
+                equalToConstant: sliderWidth
+            ),
+            volumeSlider.heightAnchor.constraint(equalToConstant: 20)
+        ])
         volumeSlider.minValue = 0
         volumeSlider.maxValue = 1
         volumeSlider.isContinuous = true
         volumeSlider.target = self
         volumeSlider.action = #selector(volumeChanged(_:))
-        container.addSubview(volumeSlider)
 
         volumeMenuItem.view = container
         volumeMenuItem.isHidden = false
@@ -500,6 +795,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     func menuWillOpen(_ menu: NSMenu) {
+        if menu === ncParentMenuItem.submenu {
+            noiseCancellingSubmenuIsOpen = true
+            return
+        }
+
         hasRestoredMenuAccess = true
         updateLaunchAtLoginMenuItem()
         // Keep the Sony control channel alive for the entire time the
@@ -508,10 +808,27 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
         // Pull the live output volume right before the menu is shown.
         refreshVolumeItem(reachable: controller.state.deviceReachable)
+        volumeRefreshTimer?.invalidate()
+        volumeRefreshTimer = Timer.scheduledTimer(
+            withTimeInterval: 0.15,
+            repeats: true
+        ) { [weak self] _ in
+            guard let self else { return }
+            self.refreshVolumeItem(
+                reachable: self.controller.state.deviceReachable
+            )
+        }
     }
 
     func menuDidClose(_ menu: NSMenu) {
+        if menu === ncParentMenuItem.submenu {
+            noiseCancellingSubmenuIsOpen = false
+            return
+        }
+
         // Start the RFCOMM release grace period only after the menu closes.
+        volumeRefreshTimer?.invalidate()
+        volumeRefreshTimer = nil
         controller.menuClosed()
 
         if preferences.hideIconWhenDisconnected && !controller.state.deviceReachable {
@@ -522,7 +839,9 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         // Detach the menu so the next click is routed through our action
         // handler again.
         DispatchQueue.main.async { [weak self] in
-            self?.statusItem.menu = nil
+            guard let self else { return }
+            self.statusItem.menu = nil
+            self.updateAmbientDetailVisibility(state: self.controller.state, keepVisibleWhileSubmenuOpen: false)
         }
     }
 
@@ -550,6 +869,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     private func render(state: HeadphonesController.State) {
         defer { refreshOpenMenuUI() }
+        notifyBatteryChanges(state: state)
         statusMenuItem.title = state.statusDescription
         reconnectMenuItem.isHidden = state.isConnected
         reconnectButton.isEnabled = true
@@ -603,6 +923,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         }
 
         updateMultipointSubmenu(state: state)
+        updateDiscoveredFeatureMenus(state: state)
 
         // Second-generation devices expose no touch-panel setting and no
         // verified power-off opcode, so hide both instead of showing controls
@@ -614,7 +935,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             // commands until a fresh RFCOMM session is initialized.
             touchButton.title = "Touch Sensor"
             touchButton.state = state.touchSensorEnabled == true ? .on : .off
-            touchButton.isEnabled = false
+            setMenuCheckmark(
+                touchButton,
+                checked: state.touchSensorEnabled == true
+            )
+            touchButton.isEnabled = true
 
             let ncLabel: String
             switch state.ncMode {
@@ -624,7 +949,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             case .none: ncLabel = "—"
             }
             ncParentMenuItem.title = state.ncMode == nil
-                ? "Noise Cancelling: —"
+                ? "Noise Cancelling"
                 : "Noise Cancelling: \(ncLabel)"
             ncParentMenuItem.isEnabled = true
 
@@ -635,7 +960,15 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             ncAmbientButton.isEnabled = false
             ncOffButton.isEnabled = false
 
-            ambientSettingsMenuItem.isEnabled = false
+            updateAmbientDetailVisibility(state: state, keepVisibleWhileSubmenuOpen: false)
+            autoAmbientButton.state = state.autoAmbientSoundEnabled == true ? .on : .off
+            setMenuCheckmark(
+                autoAmbientButton,
+                checked: state.autoAmbientSoundEnabled == true
+            )
+            autoAmbientButton.isEnabled = true
+            autoAmbientSensitivityButton.title = "Sensitivity: \(state.autoAmbientSensitivity.label)"
+            autoAmbientSensitivityButton.isEnabled = false
             ambientLevelSlider.integerValue = state.ambientLevel
             focusOnVoiceButton.state = state.ambientFocusOnVoice ? .on : .off
             focusOnVoiceButton.isEnabled = false
@@ -652,15 +985,18 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         case .some(true):
             touchButton.title = "Touch Sensor"
             touchButton.state = .on
+            setMenuCheckmark(touchButton, checked: true)
             touchButton.isEnabled = true
         case .some(false):
             touchButton.title = "Touch Sensor"
             touchButton.state = .off
+            setMenuCheckmark(touchButton, checked: false)
             touchButton.isEnabled = true
         case .none:
             touchButton.title = "Touch Sensor"
             touchButton.state = .off
-            touchButton.isEnabled = false
+            setMenuCheckmark(touchButton, checked: false)
+            touchButton.isEnabled = true
         }
 
         // Noise Cancelling submenu
@@ -674,9 +1010,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         case .some(.noiseCancelling): ncLabel = "ON"
         case .some(.ambient): ncLabel = "Ambient"
         case .some(.off): ncLabel = "Off"
-        case .none: ncLabel = "…"
+        case .none: ncLabel = ""
         }
-        ncParentMenuItem.title = "Noise Cancelling: \(ncLabel)"
+        ncParentMenuItem.title = ncLabel.isEmpty
+            ? "Noise Cancelling"
+            : "Noise Cancelling: \(ncLabel)"
         ncOnButton.state = state.ncMode == .noiseCancelling ? .on : .off
         ncAmbientButton.state = state.ncMode == .ambient ? .on : .off
         ncOffButton.state = state.ncMode == .off ? .on : .off
@@ -684,7 +1022,15 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         // Ambient Sound settings (level slider + Focus on Voice) only make
         // sense while Ambient mode is actually active on the device.
         let ambientActive = state.ncMode == .ambient
-        ambientSettingsMenuItem.isEnabled = ambientActive
+        updateAmbientDetailVisibility(state: state, keepVisibleWhileSubmenuOpen: true)
+        autoAmbientButton.state = state.autoAmbientSoundEnabled == true ? .on : .off
+        setMenuCheckmark(
+            autoAmbientButton,
+            checked: state.autoAmbientSoundEnabled == true
+        )
+        autoAmbientButton.isEnabled = true
+        autoAmbientSensitivityButton.title = "Sensitivity: \(state.autoAmbientSensitivity.label)"
+        autoAmbientSensitivityButton.isEnabled = true
         ambientLevelSlider.integerValue = state.ambientLevel
         focusOnVoiceButton.isEnabled = ambientActive
         focusOnVoiceButton.state = state.ambientFocusOnVoice ? .on : .off
@@ -703,355 +1049,120 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         }
     }
 
-    private func updateMultipointSubmenu(state: HeadphonesController.State) {
-        let hasAnyMultipointUI =
-            state.multipointToggleAvailable ||
-            !state.connectedDevices.isEmpty
+    private func notifyBatteryChanges(state: HeadphonesController.State) {
+        guard state.deviceReachable, let level = state.batteryLevel else { return }
 
-        guard state.isWH1000XM6, hasAnyMultipointUI else {
-            multipointMenuItem.isHidden = true
-            multipointLayoutSignature = ""
-            multipointButtons.removeAll()
-            multipointConnectionButtons.removeAll()
-            multipointSubmenu.removeAllItems()
+        defer {
+            lastBatteryLevel = level
+            lastBatteryCharging = state.batteryCharging
+        }
+
+        guard let previousLevel = lastBatteryLevel,
+              let previousCharging = lastBatteryCharging else {
             return
         }
 
-        multipointMenuItem.isHidden = false
-
-        func addHeader(_ title: String) {
-            let item = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-
-            let width: CGFloat = 230
-            let height: CGFloat = 24
-
-            let container = NSView(
-                frame: NSRect(x: 0, y: 0, width: width, height: height)
-            )
-            container.autoresizingMask = [.width]
-
-            let label = NSTextField(labelWithString: title)
-            label.font = .systemFont(
-                ofSize: NSFont.smallSystemFontSize,
-                weight: .semibold
-            )
-            label.textColor = .secondaryLabelColor
-            label.frame = NSRect(
-                x: 12,
-                y: 3,
-                width: width - 24,
-                height: 18
-            )
-            label.autoresizingMask = [.width]
-
-            container.addSubview(label)
-            item.view = container
-
-            multipointSubmenu.addItem(item)
-        }
-
-        let connected = state.connectedDevices
-            .filter { $0.isConnected }
-            .sorted {
-                ($0.connectionSlot ?? Int.max) <
-                ($1.connectionSlot ?? Int.max)
-            }
-
-        let disconnected = state.connectedDevices
-            .filter { !$0.isConnected }
-            .sorted {
-                $0.name.localizedCaseInsensitiveCompare($1.name) ==
-                .orderedAscending
-            }
-
-        if state.multipointEnabled == false {
-            multipointMenuItem.title = "Multipoint: Off"
-        } else if state.connectedDevicesAreLive {
-            multipointMenuItem.title =
-                "Multipoint: \(connected.count) Connected"
-        } else {
-            multipointMenuItem.title = "Multipoint: Last Known"
-        }
-
-        // Playback-right changes and multipoint ON/OFF changes should update
-        // existing custom controls in-place. Only rebuild when the actual
-        // device/layout structure changes.
-        let signature =
-            "toggle=\(state.multipointToggleAvailable)" +
-            "|manage=\(state.multipointDeviceManagementAvailable)" +
-            "|live=\(state.connectedDevicesAreLive)" +
-            "|connected=" +
-            connected.map {
-                "\($0.address)|\($0.name)|\($0.connectionSlot ?? 0)"
-            }.joined(separator: ";") +
-            "|known=" +
-            disconnected.map {
-                "\($0.address)|\($0.name)"
-            }.joined(separator: ";")
-
-        if signature != multipointLayoutSignature {
-            multipointLayoutSignature = signature
-            multipointButtons.removeAll()
-            multipointConnectionButtons.removeAll()
-            multipointSubmenu.removeAllItems()
-
-            if state.multipointToggleAvailable {
-                let item = NSMenuItem(
-                    title: "",
-                    action: nil,
-                    keyEquivalent: ""
-                )
-
-                configurePersistentButton(
-                    multipointEnabledButton,
-                    in: item,
-                    title: "Connect to 2 Devices Simultaneously",
-                    type: .switch,
-                    action: #selector(toggleMultipointEnabledFromButton(_:))
-                )
-
-                multipointSubmenu.addItem(item)
-
-                if !state.connectedDevices.isEmpty {
-                    multipointSubmenu.addItem(.separator())
-                }
-            }
-
-            if !state.connectedDevicesAreLive {
-                if !state.connectedDevices.isEmpty {
-                    addHeader("Known Devices")
-
-                    for device in state.connectedDevices.sorted(by: {
-                        $0.name.localizedCaseInsensitiveCompare($1.name) ==
-                        .orderedAscending
-                    }) {
-                        let item = NSMenuItem(
-                            title: device.name,
-                            action: nil,
-                            keyEquivalent: ""
-                        )
-                        item.isEnabled = false
-                        item.toolTip = device.address
-                        multipointSubmenu.addItem(item)
-                    }
-                }
-            } else {
-                if !connected.isEmpty {
-                    addHeader("Connected")
-
-                    for device in connected {
-                        let item = NSMenuItem(
-                            title: "",
-                            action: nil,
-                            keyEquivalent: ""
-                        )
-
-                        let button = NSButton()
-
-                        configurePersistentButton(
-                            button,
-                            in: item,
-                            title: device.name,
-                            type: .switch,
-                            action: #selector(selectMultipointPlaybackDevice(_:))
-                        )
-
-                        button.identifier =
-                            NSUserInterfaceItemIdentifier(device.address)
-
-                        multipointButtons[device.address] = button
-                        multipointSubmenu.addItem(item)
-                    }
-                }
-
-                if !connected.isEmpty && !disconnected.isEmpty {
-                    multipointSubmenu.addItem(.separator())
-                }
-
-                if !disconnected.isEmpty {
-                    addHeader("Known Devices")
-
-                    for device in disconnected {
-                        if state.multipointDeviceManagementAvailable {
-                            let item = NSMenuItem(
-                                title: "",
-                                action: nil,
-                                keyEquivalent: ""
-                            )
-
-                            let button = NSButton()
-
-                            configurePersistentActionButton(
-                                button,
-                                in: item,
-                                title: device.name,
-                                action: #selector(
-                                    multipointConnectionButtonPressed(_:)
-                                )
-                            )
-
-                            button.identifier =
-                                NSUserInterfaceItemIdentifier(
-                                    "connect|\(device.address)"
-                                )
-                            button.toolTip = "Connect \(device.name)"
-
-                            multipointConnectionButtons[
-                                "connect|\(device.address)"
-                            ] = button
-
-                            multipointSubmenu.addItem(item)
-                        } else {
-                            let item = NSMenuItem(
-                                title: device.name,
-                                action: nil,
-                                keyEquivalent: ""
-                            )
-                            item.isEnabled = false
-                            item.toolTip = device.address
-                            multipointSubmenu.addItem(item)
-                        }
-                    }
-                }
-
-                // A connected-device click remains playback-source selection.
-                // Keep disconnect explicit so the two operations cannot be
-                // confused accidentally.
-                if state.multipointDeviceManagementAvailable &&
-                    !connected.isEmpty {
-                    multipointSubmenu.addItem(.separator())
-                    addHeader("Disconnect")
-
-                    for device in connected {
-                        let item = NSMenuItem(
-                            title: "",
-                            action: nil,
-                            keyEquivalent: ""
-                        )
-
-                        let button = NSButton()
-
-                        configurePersistentActionButton(
-                            button,
-                            in: item,
-                            title: device.name,
-                            action: #selector(
-                                multipointConnectionButtonPressed(_:)
-                            )
-                        )
-
-                        button.identifier =
-                            NSUserInterfaceItemIdentifier(
-                                "disconnect|\(device.address)"
-                            )
-                        button.toolTip = "Disconnect \(device.name)"
-
-                        multipointConnectionButtons[
-                            "disconnect|\(device.address)"
-                        ] = button
-
-                        multipointSubmenu.addItem(item)
-                    }
-                }
-            }
-        }
-
-        // Update values without rebuilding the currently tracked menu.
-        let displayedMultipointEnabled =
-            state.pendingMultipointEnabled ??
-            state.multipointEnabled
-
-        multipointEnabledButton.state =
-            displayedMultipointEnabled == true ? .on : .off
-
-        multipointEnabledButton.isEnabled =
-            state.isConnected &&
-            state.multipointToggleAvailable &&
-            state.multipointEnabled != nil &&
-            state.pendingMultipointEnabled == nil
-
-        for device in connected {
-            guard let button = multipointButtons[device.address] else {
-                continue
-            }
-
-            let isPlaybackDevice =
-                device.connectionSlot == state.playbackDeviceSlot
-
-            button.state = isPlaybackDevice ? .on : .off
-            button.isEnabled =
-                state.isConnected &&
-                state.multipointEnabled != false
-
-            button.toolTip = [
-                device.address,
-                device.connectionSlot.map { "Multipoint slot \($0)" },
-                isPlaybackDevice ? "Current playback device" : nil
-            ]
-            .compactMap { $0 }
-            .joined(separator: " · ")
-        }
-
-        for button in multipointConnectionButtons.values {
-            button.isEnabled =
-                state.isConnected &&
-                state.multipointDeviceManagementAvailable &&
-                state.multipointEnabled != false
+        if previousCharging != state.batteryCharging {
+            let text = state.batteryCharging
+                ? "Headphones are charging at \(level)%."
+                : "Headphones stopped charging at \(level)%."
+            deliverBatteryNotification(text)
+        } else if previousLevel > 20 && level <= 20 {
+            deliverBatteryNotification("Headphones battery is low (\(level)%).")
         }
     }
 
-    @objc private func selectMultipointPlaybackDevice(_ sender: NSButton) {
-        guard let address = sender.identifier?.rawValue else { return }
-
-        controller.switchMultipointPlayback(to: address)
-
-        // Restore the last confirmed state until Sony replies.
-        updateMultipointSubmenu(state: controller.state)
-    }
-
-    @objc private func toggleMultipointEnabledFromButton(_ sender: NSButton) {
-        let desired = sender.state == .on
-        controller.setMultipointEnabled(desired)
-
-        // Keep UI authoritative to the headset's D7/D9 response.
-        updateMultipointSubmenu(state: controller.state)
-    }
-
-    @objc private func multipointConnectionButtonPressed(_ sender: NSButton) {
-        guard let raw = sender.identifier?.rawValue else { return }
-
-        let parts = raw.split(
-            separator: "|",
-            maxSplits: 1,
-            omittingEmptySubsequences: false
+    private func deliverBatteryNotification(_ text: String) {
+        let content = UNMutableNotificationContent()
+        content.title = "SonyConnect"
+        content.body = text
+        let request = UNNotificationRequest(
+            identifier: "battery-\(UUID().uuidString)",
+            content: content,
+            trigger: nil
         )
+        UNUserNotificationCenter.current().add(request) { error in
+            if let error {
+                FileLogger.shared.log("notifications", "battery notification failed: \(error.localizedDescription)")
+            }
+        }
+    }
 
-        guard parts.count == 2 else { return }
+    private func updateAmbientDetailVisibility(
+        state: HeadphonesController.State,
+        keepVisibleWhileSubmenuOpen: Bool
+    ) {
+        let ambientActive = state.ncMode == .ambient
+        let keepVisible = keepVisibleWhileSubmenuOpen && noiseCancellingSubmenuIsOpen
 
-        let action = String(parts[0])
-        let address = String(parts[1])
+        autoAmbientMenuItem.isHidden = !state.autoAmbientSoundAvailable && !keepVisible
+        autoAmbientSensitivityMenuItem.isHidden =
+            !(state.autoAmbientSoundAvailable && state.autoAmbientSoundEnabled == true) && !keepVisible
+        autoAmbientMenuItem.isEnabled = true
+        autoAmbientSensitivityMenuItem.isEnabled = true
+        ambientLevelMenuItem.isHidden = !ambientActive && !keepVisible
+        focusOnVoiceMenuItem.isHidden = !ambientActive && !keepVisible
+        ambientLevelMenuItem.isEnabled = ambientActive
+        focusOnVoiceButton.isEnabled = ambientActive
+    }
 
-        switch action {
-        case "connect":
-            controller.setMultipointDeviceConnected(
-                true,
-                address: address
+    private func updateMultipointSubmenu(
+        state: HeadphonesController.State
+    ) {
+        let supported =
+            state.isWH1000XM6 &&
+            (
+                state.multipointToggleAvailable ||
+                !state.connectedDevices.isEmpty
             )
 
-        case "disconnect":
-            controller.setMultipointDeviceConnected(
-                false,
-                address: address
-            )
+        multipointMenuItem.isHidden = !supported
+        multipointMenuItem.isEnabled = state.isConnected
 
-        default:
+        guard supported else {
             return
         }
+
+        multipointManagerView.render(
+            state: state
+        )
+    }
+
+    private func updateDiscoveredFeatureMenus(state: HeadphonesController.State) {
+        let live = state.isConnected
+        wearingMenuItem.isHidden = !state.pauseWhenTakenOffAvailable
+        wearingMenuItem.isEnabled = true
+        pauseWhenTakenOffButton.state = state.pauseWhenTakenOff == true ? .on : .off
+        setMenuCheckmark(
+            pauseWhenTakenOffButton,
+            checked: state.pauseWhenTakenOff == true
+        )
+        pauseWhenTakenOffButton.isEnabled = true
+
+        listeningModesMenuItem.isHidden = !state.listeningModesAvailable
+        listeningModesMenuItem.isEnabled = live
+        let listeningMode = state.listeningMode ?? .standard
+        listeningModesMenuItem.title = "Listening Mode: \(listeningMode.rawValue)"
+        listeningModeView.render(state: state)
+
+        let sensitivity = speakSensitivityLabel(state.speakToChatSensitivity)
+        let timeout = speakTimeoutLabel(state.speakToChatTimeout)
+        speakParentMenuItem.title = state.speakToChatEnabled == true
+            ? "Speak-to-Chat: On"
+            : "Speak-to-Chat: Off"
+        speakSensitivityButton.title = "Sensitivity: \(sensitivity)"
+        speakTimeoutButton.title = "Resume after: \(timeout)"
+        speakSensitivityMenuItem.isEnabled = live && state.speakToChatConfigAvailable
+        speakTimeoutMenuItem.isEnabled = live && state.speakToChatConfigAvailable
     }
 
     // MARK: - Menu actions
 
     @objc private func toggleTouchSensorButton(_ sender: NSButton) {
+        guard controller.state.isConnected,
+              controller.state.touchSensorEnabled != nil else {
+            return
+        }
         controller.toggleTouchSensor()
     }
 
@@ -1074,8 +1185,103 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         controller.toggleSpeakToChat()
     }
 
+    @objc private func togglePauseWhenTakenOff(_ sender: NSButton) {
+        guard controller.state.isConnected,
+              controller.state.pauseWhenTakenOff != nil else {
+            return
+        }
+        controller.setPauseWhenTakenOff(sender.state == .on)
+    }
+
+    @objc private func setListeningMode(_ sender: NSButton) {
+        let mode: HeadphonesController.ListeningMode
+        switch sender.tag {
+        case 1: mode = .backgroundMusic
+        case 2: mode = .cinema
+        default: mode = .standard
+        }
+        controller.setListeningMode(mode)
+    }
+
+    @objc private func setBgmRoomSize(_ sender: NSButton) {
+        controller.setBgmRoomSize(UInt8(sender.tag))
+    }
+
+    private func bgmRoomName(_ value: UInt8?) -> String {
+        switch value {
+        case 0x00: return "My Room"
+        case 0x01: return "Living Room"
+        case 0x02: return "Cafe"
+        default: return "My Room"
+        }
+    }
+
+    private var listeningButtons: [Int: NSButton] = [:]
+
+    private func listeningButton(for item: NSMenuItem, tag: Int) -> NSButton {
+        if let button = listeningButtons[tag] { return button }
+        let button = NSButton()
+        button.tag = tag
+        listeningButtons[tag] = button
+        return button
+    }
+
+    private func speakSensitivityLabel(_ value: UInt8?) -> String {
+        switch value {
+        case 0: return "Low"
+        case 1: return "Standard"
+        case 2: return "High"
+        case 3: return "Very High"
+        case 4: return "Maximum"
+        default: return "—"
+        }
+    }
+
+    private func speakTimeoutLabel(_ value: UInt8?) -> String {
+        switch value {
+        case 0: return "Immediate"
+        case 1: return "15 seconds"
+        case 2: return "30 seconds"
+        case 3: return "60 seconds"
+        default: return "—"
+        }
+    }
+
+    @objc private func cycleSpeakSensitivity(_ sender: NSMenuItem) {
+        let current = controller.state.speakToChatSensitivity ?? 0
+        let next = (current + 1) % 5
+        controller.setSpeakToChatConfiguration(
+            sensitivity: next,
+            timeout: controller.state.speakToChatTimeout ?? 0
+        )
+    }
+
+    @objc private func cycleSpeakTimeout(_ sender: NSMenuItem) {
+        let current = controller.state.speakToChatTimeout ?? 0
+        let next = (current + 1) % 4
+        controller.setSpeakToChatConfiguration(
+            sensitivity: controller.state.speakToChatSensitivity ?? 0,
+            timeout: next
+        )
+    }
+
     @objc private func toggleFocusOnVoiceButton(_ sender: NSButton) {
         controller.setAmbientFocusOnVoice(sender.state == .on)
+    }
+
+    @objc private func toggleAutoAmbientButton(_ sender: NSButton) {
+        guard controller.state.isConnected,
+              controller.state.autoAmbientSoundAvailable else {
+            return
+        }
+        controller.setAutoAmbientSound(sender.state == .on)
+    }
+
+    @objc private func cycleAutoAmbientSensitivity(_ sender: NSButton) {
+        let values = HeadphonesController.AutoAmbientSensitivity.allCases
+        let current = controller.state.autoAmbientSensitivity
+        let nextIndex = (values.firstIndex(of: current).map { $0 + 1 } ?? 0) % values.count
+        controller.setAutoAmbientSensitivity(values[nextIndex])
     }
 
     private func updateEqSubmenu(presets: [HeadphonesController.EqPreset], current: UInt8?) {
