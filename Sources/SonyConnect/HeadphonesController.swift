@@ -41,7 +41,6 @@ final class HeadphonesController {
     private let parser = SonyFrameParser()
     private let autoOff = AutoPowerOff()
     private let media = MediaController()
-    private let audioMonitor = AudioActivityMonitor(nameHints: SupportedDevices.nameHints)
     private let policy: ConnectionPolicy
     private var outgoingSequence: UInt8 = 0
     private var initialized = false
@@ -195,7 +194,7 @@ final class HeadphonesController {
     static let maxAmbientLevel: UInt8 = 20
 
     init() {
-        policy = ConnectionPolicy(audio: audioMonitor)
+        policy = ConnectionPolicy()
         bluetooth.onStatus = { [weak self] s in self?.handleStatus(s) }
         bluetooth.onData = { [weak self] data in self?.handleIncoming(data) }
         autoOff.onShouldPowerOff = { [weak self] in self?.sendPowerOff() }
@@ -214,7 +213,7 @@ final class HeadphonesController {
                 FileLogger.shared.log("policy", "idle disconnect skipped — auto-power-off armed")
                 return
             }
-            FileLogger.shared.log("policy", "disconnecting RFCOMM to save headphones battery")
+            FileLogger.shared.log("policy", "releasing RFCOMM control channel")
             self.bluetooth.disconnect()
         }
         bluetooth.onReachabilityChange = { [weak self] reachable, name in
