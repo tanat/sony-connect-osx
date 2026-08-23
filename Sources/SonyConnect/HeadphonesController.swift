@@ -34,6 +34,7 @@ final class HeadphonesController {
         var eqBands: [Int] = []
         var connectedDevices: [ConnectedDevice] = []
         var connectedDevicesAreLive: Bool = false
+        var playbackDeviceSlot: Int? = nil
         var autoOffOption: AutoPowerOffOption = .off
         var statusDescription: String = "Disconnected"
         var ambientLevel: Int = 20          // 0...20, meaningful only while ncMode == .ambient
@@ -128,7 +129,16 @@ final class HeadphonesController {
 
         // Device connection/list status. XM6 sends this spontaneously and
         // includes known Bluetooth devices plus per-device metadata.
+        static let connectedDevicesGet: UInt8 = 0x36
+        static let connectedDevicesRet: UInt8 = 0x37
         static let connectedDevicesNotify: UInt8 = 0x39
+        static let connectedDevicesInquiryType: UInt8 = 0x02
+
+        // Table-2 PERI_SET_EXTENDED_PARAM / SOURCE_SWITCH_CONTROL.
+        // Payload: 3C 01 <17-byte ASCII Bluetooth address>
+        static let sourceSwitchSetExtendedParam: UInt8 = 0x3C
+        static let sourceSwitchNotifyExtendedParam: UInt8 = 0x3D
+        static let sourceSwitchInquiryType: UInt8 = 0x01
         static let ncasmGet: UInt8 = 0x66        // 66 <t>       -> RET 67 <t> 01 <effect> <type> <voice> <level>
         static let ncasmRet: UInt8 = 0x67
         static let ncasmSet: UInt8 = 0x68        // 68 <t> 01 <effect> <type> <voice> <level>
@@ -371,11 +381,68 @@ final class HeadphonesController {
         policy.menuClosed()
     }
 
+    func switchMultipointPlayback(to address: String) {
+        policy.userActivity()
+
+        guard initialized,
+              isV2,
+              state.isWH1000XM6,
+              state.connectedDevicesAreLive else {
+            FileLogger.shared.log(
+                "cmd",
+                "MULTIPOINT SOURCE SWITCH skipped: live XM6 device state unavailable"
+            )
+            return
+        }
+
+        guard let device = state.connectedDevices.first(where: {
+            $0.address.caseInsensitiveCompare(address) == .orderedSame
+        }), device.isConnected else {
+            FileLogger.shared.log(
+                "cmd",
+                "MULTIPOINT SOURCE SWITCH skipped: target is not currently connected"
+            )
+            return
+        }
+
+        guard device.connectionSlot != state.playbackDeviceSlot else {
+            FileLogger.shared.log(
+                "cmd",
+                "MULTIPOINT SOURCE SWITCH skipped: \(device.name) already owns playback"
+            )
+            return
+        }
+
+        let addressBytes = Array(address.utf8)
+        guard addressBytes.count == 17 else {
+            FileLogger.shared.log(
+                "cmd",
+                "MULTIPOINT SOURCE SWITCH skipped: malformed Bluetooth address '\(address)'"
+            )
+            return
+        }
+
+        sendPayload(
+            [V2Opcode.sourceSwitchSetExtendedParam,
+             V2Opcode.sourceSwitchInquiryType] + addressBytes,
+            dataType: .command2,
+            label: "MULTIPOINT SOURCE SWITCH -> \(device.name)"
+        )
+
+        // Re-read the authoritative Table-2 list after the headphones have
+        // had time to perform the source handoff. This is the same safe GET
+        // used during initialization.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { [weak self] in
+            self?.sendConnectedDevicesGetV2()
+        }
+    }
+
     private func resetSessionState() {
         initialized = false
         awaitingInitResponse = false
         outgoingSequence = 0
         parser.reset()
+        state.playbackDeviceSlot = nil
         touchPanelSlot = nil
         touchPanelIsListType = false
         ncSettingType = 0x02
@@ -681,6 +748,9 @@ final class HeadphonesController {
             // v2 has no general-setting capability family (so no touch panel)
             // and no EQ capability query — the preset ids are fixed.
             state.eqPresets = Self.v2EqPresets
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+                self?.sendConnectedDevicesGetV2()
+            }
         } else {
             queryGeneralSettingCapabilities()
         }
@@ -736,14 +806,28 @@ final class HeadphonesController {
         sendPayload([Opcode.eqGetParam, Opcode.eqPresetInquiredType], label: "EQ GET")
     }
 
-    private func sendPayload(_ payload: [UInt8], label: String) {
+    private func sendConnectedDevicesGetV2() {
+        guard isV2, state.isWH1000XM6 else { return }
+
+        sendPayload(
+            [V2Opcode.connectedDevicesGet, V2Opcode.connectedDevicesInquiryType],
+            dataType: .command2,
+            label: "CONNECTED DEVICES GET (v2 table2)"
+        )
+    }
+
+    private func sendPayload(
+        _ payload: [UInt8],
+        dataType: SonyDataType = .command1,
+        label: String
+    ) {
         // Suppress sends if the BT layer has dropped — avoids a flood of
         // "NO CHANNEL" lines after a mid-init disconnect.
         guard case .connected = bluetooth.status else {
             FileLogger.shared.log("cmd", "skip \(label): not connected")
             return
         }
-        let packet = SonyPacket(dataType: .command1,
+        let packet = SonyPacket(dataType: dataType,
                                 sequence: outgoingSequence,
                                 payload: payload)
         outgoingSequence ^= 1
@@ -843,6 +927,25 @@ final class HeadphonesController {
     }
 
     private func interpret(_ packet: SonyPacket) {
+        if packet.dataType == .command2 {
+            guard isV2, let opcode = packet.payload.first else {
+                return
+            }
+
+            switch opcode {
+            case V2Opcode.connectedDevicesRet, V2Opcode.connectedDevicesNotify:
+                parseConnectedDevicesV2(packet.payload)
+            case V2Opcode.sourceSwitchNotifyExtendedParam:
+                parseSourceSwitchNotifyV2(packet.payload)
+            default:
+                FileLogger.shared.log(
+                    "state",
+                    "v2 table2 unhandled opcode 0x\(String(format: "%02X", opcode))"
+                )
+            }
+            return
+        }
+
         guard packet.dataType == .command1, let opcode = packet.payload.first else {
             return
         }
@@ -961,34 +1064,94 @@ final class HeadphonesController {
             parseTouchSensorV2(packet.payload)
         case V2Opcode.initReply:
             break
-        case V2Opcode.connectedDevicesNotify:
-            parseConnectedDevicesV2(packet.payload)
         default:
             FileLogger.shared.log("state",
                 "v2 unhandled opcode 0x\(String(format: "%02X", opcode))")
         }
     }
 
-    private func parseConnectedDevicesV2(_ payload: [UInt8]) {
-        // XM6 device-list notification:
+    private func parseSourceSwitchNotifyV2(_ payload: [UInt8]) {
+        // Table-2 PERI_NTFY_EXTENDED_PARAM / SOURCE_SWITCH_CONTROL:
         //
-        // 39 02 <count>
+        //   3D 01 <result> <17-byte ASCII Bluetooth address>
+        //
+        // SourceSwitchControlResult:
+        //   00 SUCCESS
+        //   01 FAIL
+        //   02 FAIL_CALLING
+        //   03 FAIL_A2DP_NOT_CONNECT
+        //   04 FAIL_GIVE_PRIORITY_TO_VOICE_ASSISTANT
+        guard payload.count >= 20,
+              payload[0] == V2Opcode.sourceSwitchNotifyExtendedParam,
+              payload[1] == V2Opcode.sourceSwitchInquiryType else {
+            return
+        }
+
+        let result = payload[2]
+
+        let address = String(
+            bytes: payload[3..<20],
+            encoding: .ascii
+        ) ?? "<bad-address>"
+
+        let resultDescription: String
+        switch result {
+        case 0x00:
+            resultDescription = "success"
+
+            // The subsequent 0x39/0x37 list remains authoritative, but the
+            // successful notification already tells us which connected device
+            // Sony accepted as the playback target.
+            if let device = state.connectedDevices.first(where: {
+                $0.address.caseInsensitiveCompare(address) == .orderedSame
+            }) {
+                state.playbackDeviceSlot = device.connectionSlot
+            }
+
+        case 0x01:
+            resultDescription = "failed"
+        case 0x02:
+            resultDescription = "failed: call active"
+        case 0x03:
+            resultDescription = "failed: A2DP not connected"
+        case 0x04:
+            resultDescription = "failed: voice assistant has priority"
+        default:
+            resultDescription =
+                "unknown result 0x\(String(format: "%02X", result))"
+        }
+
+        let targetName = state.connectedDevices.first(where: {
+            $0.address.caseInsensitiveCompare(address) == .orderedSame
+        })?.name ?? address
+
+        FileLogger.shared.log(
+            "devices",
+            "multipoint source switch \(resultDescription): \(targetName)"
+        )
+    }
+
+    private func parseConnectedDevicesV2(_ payload: [UInt8]) {
+        // XM6 Table-2 device list:
+        //
+        // 37/39 02 <count>
         //   <17-byte ASCII Bluetooth address>
-        //   <4 metadata bytes>
+        //   <connected status>
+        //   <3-byte Bluetooth Class of Device>
         //   <1-byte UTF-8 name length>
         //   <name>
+        // ... repeated <count> times
+        // <playbackrightDevice>
         //
-        // Observed connection semantics:
-        //   metadata[0] = 0x00 -> disconnected
-        //   metadata[0] = 0x01 -> connected, multipoint slot 1
-        //   metadata[0] = 0x02 -> connected, multipoint slot 2
-        //
-        // The remaining metadata bytes are retained verbatim because their
-        // meanings have not yet been established.
+        // connected status:
+        //   0x00 -> disconnected
+        //   0x01 -> connected, multipoint slot 1
+        //   0x02 -> connected, multipoint slot 2
 
         guard payload.count >= 3,
-              payload[0] == V2Opcode.connectedDevicesNotify,
-              payload[1] == 0x02 else {
+              (payload[0] == V2Opcode.connectedDevicesRet
+               || payload[0] == V2Opcode.connectedDevicesNotify),
+              payload[1] == V2Opcode.connectedDevicesInquiryType else {
             return
         }
 
@@ -1053,12 +1216,39 @@ final class HeadphonesController {
             )
         }
 
-        guard !devices.isEmpty else { return }
+        guard devices.count == expectedCount else {
+            FileLogger.shared.log(
+                "devices",
+                "device-list rejected: expected \(expectedCount) entries, parsed \(devices.count)"
+            )
+            return
+        }
+
+        // The serialized Table-2 structure contains exactly one byte after
+        // the final device record: playbackrightDevice.
+        guard offset + 1 == payload.count else {
+            FileLogger.shared.log(
+                "devices",
+                "device-list rejected: malformed playback-right trailer"
+            )
+            return
+        }
+
+        let playbackDeviceSlot: Int?
+        switch payload[offset] {
+        case 0x01:
+            playbackDeviceSlot = 1
+        case 0x02:
+            playbackDeviceSlot = 2
+        default:
+            playbackDeviceSlot = nil
+        }
 
         // Packet ordering changes as devices connect/disconnect, so identity is
         // always the Bluetooth address, never the array position.
         state.connectedDevices = devices
         state.connectedDevicesAreLive = true
+        state.playbackDeviceSlot = playbackDeviceSlot
         saveConnectedDevicesCache(devices)
 
         let summary = devices.map { device -> String in
@@ -1068,7 +1258,11 @@ final class HeadphonesController {
             return "\(device.name)=disconnected"
         }.joined(separator: ", ")
 
-        FileLogger.shared.log("devices", summary)
+        let playbackSummary = playbackDeviceSlot.map { "slot\($0)" } ?? "unknown"
+        FileLogger.shared.log(
+            "devices",
+            "\(summary); playback=\(playbackSummary)"
+        )
     }
 
     private func parseGsCapabilityV2(_ payload: [UInt8]) {

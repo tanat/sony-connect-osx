@@ -708,16 +708,47 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         multipointMenuItem.isHidden = false
         multipointSubmenu.removeAllItems()
 
-        // Before a fresh 0x39 arrives this process may only have the persisted
-        // known-device cache. Do not present old connection slots as current.
-        if !state.connectedDevicesAreLive {
-            multipointMenuItem.title = "Multipoint"
+        func addHeader(_ title: String) {
+            let item = NSMenuItem(title: "", action: nil, keyEquivalent: "")
 
-            let devices = state.connectedDevices.sorted {
+            let width: CGFloat = 230
+            let height: CGFloat = 24
+
+            let container = NSView(
+                frame: NSRect(x: 0, y: 0, width: width, height: height)
+            )
+            container.autoresizingMask = [.width]
+
+            let label = NSTextField(labelWithString: title)
+            label.font = .systemFont(
+                ofSize: NSFont.smallSystemFontSize,
+                weight: .semibold
+            )
+            label.textColor = .secondaryLabelColor
+            label.frame = NSRect(
+                x: 12,
+                y: 3,
+                width: width - 24,
+                height: 18
+            )
+            label.autoresizingMask = [.width]
+
+            container.addSubview(label)
+            item.view = container
+
+            multipointSubmenu.addItem(item)
+        }
+
+        // Cached data only identifies devices known to the XM6. Connection and
+        // playback-slot state is valid only after a fresh Table-2 0x37/0x39 list.
+        guard state.connectedDevicesAreLive else {
+            multipointMenuItem.title = "Multipoint: Last Known"
+
+            addHeader("Known Devices")
+
+            for device in state.connectedDevices.sorted(by: {
                 $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
-            }
-
-            for device in devices {
+            }) {
                 let item = NSMenuItem(
                     title: device.name,
                     action: nil,
@@ -734,45 +765,70 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         let connected = state.connectedDevices
             .filter { $0.isConnected }
             .sorted {
-                ($0.connectionSlot ?? Int.max) < ($1.connectionSlot ?? Int.max)
+                ($0.connectionSlot ?? Int.max) <
+                ($1.connectionSlot ?? Int.max)
             }
 
         let disconnected = state.connectedDevices
             .filter { !$0.isConnected }
             .sorted {
-                $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+                $0.name.localizedCaseInsensitiveCompare($1.name) ==
+                .orderedAscending
             }
 
         multipointMenuItem.title = "Multipoint: \(connected.count) Connected"
 
-        for device in connected {
-            let slot = device.connectionSlot ?? 0
-            let item = NSMenuItem(
-                title: "\(device.name)  ·  Device \(slot)",
-                action: nil,
-                keyEquivalent: ""
-            )
-            item.state = .on
-            item.isEnabled = false
-            item.toolTip = device.address
-            multipointSubmenu.addItem(item)
+        if !connected.isEmpty {
+            addHeader("Connected")
+
+            for device in connected {
+                let isPlaybackDevice =
+                    device.connectionSlot == state.playbackDeviceSlot
+
+                let item = NSMenuItem(
+                    title: device.name,
+                    action: #selector(selectMultipointPlaybackDevice(_:)),
+                    keyEquivalent: ""
+                )
+                item.target = self
+                item.representedObject = device.address
+                item.state = isPlaybackDevice ? .on : .off
+                item.isEnabled = state.isConnected
+                item.toolTip = [
+                    device.address,
+                    device.connectionSlot.map { "Multipoint slot \($0)" },
+                    isPlaybackDevice ? "Current playback device" : nil
+                ]
+                .compactMap { $0 }
+                .joined(separator: " · ")
+
+                multipointSubmenu.addItem(item)
+            }
         }
 
         if !connected.isEmpty && !disconnected.isEmpty {
             multipointSubmenu.addItem(.separator())
         }
 
-        for device in disconnected {
-            let item = NSMenuItem(
-                title: device.name,
-                action: nil,
-                keyEquivalent: ""
-            )
-            item.state = .off
-            item.isEnabled = false
-            item.toolTip = device.address
-            multipointSubmenu.addItem(item)
+        if !disconnected.isEmpty {
+            addHeader("Known Devices")
+
+            for device in disconnected {
+                let item = NSMenuItem(
+                    title: device.name,
+                    action: nil,
+                    keyEquivalent: ""
+                )
+                item.isEnabled = false
+                item.toolTip = device.address
+                multipointSubmenu.addItem(item)
+            }
         }
+    }
+
+    @objc private func selectMultipointPlaybackDevice(_ sender: NSMenuItem) {
+        guard let address = sender.representedObject as? String else { return }
+        controller.switchMultipointPlayback(to: address)
     }
 
     // MARK: - Menu actions
