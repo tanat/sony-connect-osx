@@ -43,9 +43,7 @@ final class BluetoothClient: NSObject {
             switch status {
             case .connected:
                 cancelReconnect()
-            case .failed:
-                scheduleReconnect()
-            case .disconnected:
+            case .failed, .disconnected:
                 if !suppressAutoReconnect {
                     scheduleReconnect()
                 }
@@ -138,6 +136,18 @@ final class BluetoothClient: NSObject {
         channel = nil
         device = nil
         status = .disconnected
+    }
+
+    // Closing RFCOMM alone leaves A2DP connected, preventing native auto-off.
+    @discardableResult
+    func disconnectDevice() -> IOReturn {
+        guard let target = device ?? targetPairedDevice() else { return kIOReturnNotFound }
+        disconnect() // suppress reconnects before closing the baseband connection
+        let result = target.closeConnection()
+        FileLogger.shared.log("bt", "device disconnect result=\(result)")
+        // The native cache can stay true until the later ACL notification.
+        onReachabilityChange?(result == kIOReturnSuccess ? false : target.isConnected(), target.name)
+        return result
     }
 
     private func scheduleReconnect() {
