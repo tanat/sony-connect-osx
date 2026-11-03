@@ -43,6 +43,10 @@ final class HeadphonesController {
     private var initialized = false
     private var awaitingInitResponse = false
     private var deviceName: String = "headphones"
+    private var nativeAutoOffRequest: UUID?
+    private var waitingForNativePowerOff = false
+
+    var usesNativeAutoOff: Bool { deviceName.contains("WH-1000XM3") }
 
     // Sony MDR V1 opcodes (from JADX decompile of Sony Headphones Connect
     // 9.3.0, package com.sony.songpal.tandemfamily.message.mdr.v1.table1).
@@ -87,6 +91,8 @@ final class HeadphonesController {
         static let systemRet: UInt8 = 0xF7
         static let systemSet: UInt8 = 0xF8
         static let systemNotify: UInt8 = 0xF9
+        static let systemSetExtended: UInt8 = 0xFC
+        static let autoPowerOff: UInt8 = 0x04
         static let smartTalkingMode: UInt8 = 0x05            // SystemInquiredType.SMART_TALKING_MODE
         static let smartTalkingParamModeOnOff: UInt8 = 0x01
     }
@@ -105,9 +111,16 @@ final class HeadphonesController {
         bluetooth.onData = { [weak self] data in self?.handleIncoming(data) }
         autoOff.onShouldPowerOff = { [weak self] in self?.sendPowerOff() }
         autoOff.onOptionChanged = { [weak self] option in
-            self?.state.autoOffOption = option
+            guard let self = self else { return }
+            self.state.autoOffOption = option
+            if self.usesNativeAutoOff, option.idleSeconds != nil, self.state.deviceReachable {
+                self.policy.userActivity()
+            }
         }
-        policy.onShouldConnect = { [weak self] in self?.bluetooth.connect() }
+        policy.onShouldConnect = { [weak self] in
+            guard let self = self, !self.waitingForNativePowerOff else { return }
+            self.bluetooth.connect()
+        }
         policy.onShouldDisconnect = { [weak self] in
             guard let self = self else { return }
             // If auto-power-off is armed, keep the SPP channel open so its
@@ -131,12 +144,18 @@ final class HeadphonesController {
 
     private func handleReachability(_ reachable: Bool, name: String?) {
         if let name = name { deviceName = name }
+        if reachable { waitingForNativePowerOff = false }
         state.deviceReachable = reachable
         // Keep the status line consistent with the icon while the SPP
         // channel is closed: "(idle)" when the device is still around,
         // "Disconnected" when it's gone.
         if !state.isConnected {
-            state.statusDescription = reachable ? "\(deviceName) (idle)" : "Disconnected"
+            state.statusDescription = waitingForNativePowerOff
+                ? "Disconnected (5-min auto-off enabled)"
+                : reachable ? "\(deviceName) (idle)" : "Disconnected"
+        }
+        if reachable, usesNativeAutoOff, autoOff.isEnabled {
+            policy.userActivity()
         }
     }
 
@@ -152,6 +171,7 @@ final class HeadphonesController {
 
     func connect() {
         // User clicked Reconnect — counts as user activity.
+        waitingForNativePowerOff = false
         policy.userActivity()
     }
 
@@ -163,6 +183,7 @@ final class HeadphonesController {
     }
 
     private func resetSessionState() {
+        nativeAutoOffRequest = nil
         initialized = false
         awaitingInitResponse = false
         outgoingSequence = 0
@@ -305,6 +326,10 @@ final class HeadphonesController {
     }
 
     private func sendPowerOff() {
+        if usesNativeAutoOff {
+            prepareNativeAutoOff()
+            return
+        }
         // Pause first so audio doesn't briefly blast through the laptop
         // speakers when A2DP drops as the headphones power down.
         media.pause()
@@ -312,6 +337,26 @@ final class HeadphonesController {
                      Opcode.powerOffFixedValue,
                      Opcode.powerOffUserOff],
                     label: "POWER_OFF")
+    }
+
+    private func prepareNativeAutoOff() {
+        guard nativeAutoOffRequest == nil else { return }
+        let request = UUID()
+        nativeAutoOffRequest = request
+        // XM3 advertises AUTO_POWER_OFF, but not remote POWER_OFF. Set and
+        // verify its native five-minute timer before disconnecting all profiles.
+        sendPayload([Opcode.systemSetExtended, Opcode.autoPowerOff, 0x01, 0x00, 0x00],
+                    label: "XM3 AUTO_OFF SET 5min")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            guard let self = self, self.nativeAutoOffRequest == request else { return }
+            self.sendPayload([Opcode.systemGet, Opcode.autoPowerOff], label: "XM3 AUTO_OFF VERIFY")
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            guard let self = self, self.nativeAutoOffRequest == request else { return }
+            self.nativeAutoOffRequest = nil
+            self.state.statusDescription = "Auto-off verification failed; retry power-off"
+            FileLogger.shared.log("autoOff", "XM3 native setting not confirmed; keeping Bluetooth connected")
+        }
     }
 
     private func queryGeneralSettingCapabilities() {
@@ -674,6 +719,20 @@ final class HeadphonesController {
     }
 
     private func parseSystem(_ payload: [UInt8]) {
+        if payload.count >= 5, payload[0] == Opcode.systemRet,
+           payload[1] == Opcode.autoPowerOff, nativeAutoOffRequest != nil {
+            guard Array(payload[2...4]) == [0x01, 0x00, 0x00] else { return }
+            nativeAutoOffRequest = nil
+            media.pause()
+            waitingForNativePowerOff = true
+            FileLogger.shared.log("autoOff", "XM3 native 5-min auto-off confirmed; disconnecting Bluetooth")
+            let result = bluetooth.disconnectDevice()
+            if result != 0 { waitingForNativePowerOff = false }
+            state.statusDescription = result == 0
+                ? "Disconnected (5-min auto-off enabled)"
+                : "Bluetooth disconnect failed (\(result)); try Reconnect"
+            return
+        }
         // SystemInquiredType is at [1]. Payload structure after that
         // depends on whether this is RET or NTFY:
         //   RET (0xF7): [SmartTalkingModeSettingType=0x00 ON_OFF] [value]

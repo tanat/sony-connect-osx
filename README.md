@@ -26,6 +26,14 @@ A macOS menu-bar app that controls Sony WH-1000XM4 headphones over Bluetooth —
 
 Built and tested on **Sony WH-1000XM4**. The name-matching list in [`BluetoothClient.swift`](Sources/SonyConnect/BluetoothClient.swift) also accepts WH-1000XM3 and WH-1000XM5. Other Sony MDR-family headphones may work — feature mapping (which opcode controls what) is partly device-specific.
 
+For **WH-1000XM3**, choose **Disconnect & Auto Power Off (5 min)**. The app sets the
+headphones' native auto-off timer to five minutes, reads it back, then disconnects
+the entire Bluetooth connection. It keeps automatic reconnection suppressed until
+you choose **Reconnect** or reconnect the headphones yourself. **Idle Disconnect**
+uses the same action after the selected period without audio, so total time until
+power-off is the selected idle time plus about five minutes. The app must remain
+running, and the headphones must not connect to another device during that time.
+
 ## Requirements
 
 - macOS 12 Monterey or newer

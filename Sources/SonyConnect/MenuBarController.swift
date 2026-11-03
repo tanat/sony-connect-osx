@@ -299,6 +299,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     private func render(state: HeadphonesController.State) {
         statusMenuItem.title = state.statusDescription
+        powerOffMenuItem.title = controller.usesNativeAutoOff
+            ? "Disconnect & Auto Power Off (5 min)" : "Power Off Headphones"
         updateAutoOffSubmenu(state: state)
 
         // Default: the icon stays put and dims while the headphones are
@@ -460,9 +462,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         for item in autoOffSubmenu.items {
             item.state = item.tag == state.autoOffOption.rawValue ? .on : .off
         }
-        autoOffMenuItem.title = state.autoOffOption == .off
-            ? "Auto Power Off: Off"
-            : "Auto Power Off: \(state.autoOffOption.title)"
+        let label = controller.usesNativeAutoOff ? "Idle Disconnect" : "Auto Power Off"
+        autoOffMenuItem.title = "\(label): \(state.autoOffOption.title)"
     }
 
     @objc private func setAutoOffFromMenu(_ sender: NSMenuItem) {
