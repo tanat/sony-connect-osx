@@ -20,6 +20,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let touchMenuItem = NSMenuItem(title: "Touch Sensor: —", action: nil, keyEquivalent: "")
     private let ncParentMenuItem = NSMenuItem(title: "Noise Cancelling: —", action: nil, keyEquivalent: "")
     private let ncOnItem = NSMenuItem(title: "Noise Cancelling", action: nil, keyEquivalent: "")
+    private let ncWindItem = NSMenuItem(title: "Wind Noise Reduction", action: nil, keyEquivalent: "")
     private let ncAmbientItem = NSMenuItem(title: "Ambient Sound", action: nil, keyEquivalent: "")
     private let ncOffItem = NSMenuItem(title: "Off", action: nil, keyEquivalent: "")
     private let ambientSettingsMenuItem = NSMenuItem(title: "Ambient Sound Settings", action: nil, keyEquivalent: "")
@@ -28,6 +29,14 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let ambientLevelSlider = ScrollableSlider()
     private let focusOnVoiceMenuItem = NSMenuItem(title: "Focus on Voice", action: nil, keyEquivalent: "")
     private let speakToChatMenuItem = NSMenuItem(title: "Speak-to-Chat: —", action: nil, keyEquivalent: "")
+    private let stcSettingsItem = NSMenuItem(title: "Speak-to-Chat Settings", action: nil, keyEquivalent: "")
+    private let stcSettingsMenu = NSMenu(title: "Speak-to-Chat Settings")
+    private let dseeMenuItem = NSMenuItem(title: "DSEE Extreme: —", action: nil, keyEquivalent: "")
+    private let pauseOffMenuItem = NSMenuItem(title: "Pause When Taken Off: —", action: nil, keyEquivalent: "")
+    private let voiceGuideMenuItem = NSMenuItem(title: "Voice Guidance: —", action: nil, keyEquivalent: "")
+    private let deviceAutoOffItem = NSMenuItem(title: "Headphone Auto Off", action: nil, keyEquivalent: "")
+    private let deviceAutoOffMenu = NSMenu(title: "Headphone Auto Off")
+    private let codecMenuItem = NSMenuItem(title: "Codec: —", action: nil, keyEquivalent: "")
     private let autoOffMenuItem = NSMenuItem(title: "Auto Power Off", action: nil, keyEquivalent: "")
     private let autoOffSubmenu = NSMenu(title: "Auto Power Off")
     private let powerOffMenuItem = NSMenuItem(title: "Power Off Headphones", action: nil, keyEquivalent: "")
@@ -115,7 +124,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
         // Noise Cancelling submenu (three radio-style options)
         let ncSubmenu = NSMenu(title: "Noise Cancelling")
-        for (item, tag) in [(ncOnItem, 0), (ncAmbientItem, 1), (ncOffItem, 2)] {
+        for (item, tag) in [(ncOnItem, 0), (ncWindItem, 3), (ncAmbientItem, 1), (ncOffItem, 2)] {
             item.target = self
             item.action = #selector(setNCFromMenu(_:))
             item.tag = tag
@@ -137,6 +146,42 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         speakToChatMenuItem.target = self
         speakToChatMenuItem.action = #selector(toggleSpeakToChat)
         popupMenu.addItem(speakToChatMenuItem)
+        stcSettingsItem.submenu = stcSettingsMenu
+        popupMenu.addItem(stcSettingsItem)
+        for value in HeadphonesController.StcSensitivity.allCases {
+            let item = NSMenuItem(title: "Sensitivity: \(value.title)", action: #selector(setStcSensitivity(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = Int(value.rawValue)
+            stcSettingsMenu.addItem(item)
+        }
+        stcSettingsMenu.addItem(.separator())
+        for value in HeadphonesController.StcTimeout.allCases {
+            let item = NSMenuItem(title: "Ends after: \(value.title)", action: #selector(setStcTimeout(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = Int(value.rawValue)
+            stcSettingsMenu.addItem(item)
+        }
+
+        dseeMenuItem.target = self
+        dseeMenuItem.action = #selector(toggleDsee)
+        popupMenu.addItem(dseeMenuItem)
+        codecMenuItem.isEnabled = false
+        popupMenu.addItem(codecMenuItem)
+
+        pauseOffMenuItem.target = self
+        pauseOffMenuItem.action = #selector(togglePauseWhenTakenOff)
+        popupMenu.addItem(pauseOffMenuItem)
+        voiceGuideMenuItem.target = self
+        voiceGuideMenuItem.action = #selector(toggleVoiceGuide)
+        popupMenu.addItem(voiceGuideMenuItem)
+        deviceAutoOffItem.submenu = deviceAutoOffMenu
+        for (index, option) in HeadphonesController.DeviceAutoOff.selectable.enumerated() {
+            let item = NSMenuItem(title: option.title, action: #selector(setDeviceAutoOff(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = index
+            deviceAutoOffMenu.addItem(item)
+        }
+        popupMenu.addItem(deviceAutoOffItem)
 
         popupMenu.addItem(.separator())
 
@@ -353,6 +398,15 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             speakToChatMenuItem.title = "Speak-to-Chat: —"
             speakToChatMenuItem.state = .off
             speakToChatMenuItem.isEnabled = false
+            stcSettingsItem.isEnabled = false
+            dseeMenuItem.isEnabled = false
+            dseeMenuItem.title = "DSEE Extreme: —"
+            pauseOffMenuItem.isEnabled = false
+            pauseOffMenuItem.title = "Pause When Taken Off: —"
+            voiceGuideMenuItem.isEnabled = false
+            voiceGuideMenuItem.title = "Voice Guidance: —"
+            deviceAutoOffItem.isEnabled = false
+            codecMenuItem.title = "Codec: —"
             powerOffMenuItem.isEnabled = false
             return
         }
@@ -379,12 +433,14 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         let ncLabel: String
         switch state.ncMode {
         case .some(.noiseCancelling): ncLabel = "ON"
+        case .some(.wind): ncLabel = "Wind"
         case .some(.ambient): ncLabel = "Ambient"
         case .some(.off): ncLabel = "Off"
         case .none: ncLabel = "…"
         }
         ncParentMenuItem.title = "Noise Cancelling: \(ncLabel)"
         ncOnItem.state = state.ncMode == .noiseCancelling ? .on : .off
+        ncWindItem.state = state.ncMode == .wind ? .on : .off
         ncAmbientItem.state = state.ncMode == .ambient ? .on : .off
         ncOffItem.state = state.ncMode == .off ? .on : .off
 
@@ -409,6 +465,39 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             speakToChatMenuItem.title = "Speak-to-Chat: …"
             speakToChatMenuItem.state = .off
         }
+        stcSettingsItem.isEnabled = state.stcSensitivity != nil && state.stcTimeout != nil
+        for item in stcSettingsMenu.items where item.action == #selector(setStcSensitivity(_:)) {
+            item.state = item.tag == state.stcSensitivity.map { Int($0.rawValue) } ? .on : .off
+        }
+        for item in stcSettingsMenu.items where item.action == #selector(setStcTimeout(_:)) {
+            item.state = item.tag == state.stcTimeout.map { Int($0.rawValue) } ? .on : .off
+        }
+        applyToggle(dseeMenuItem, title: "DSEE Extreme", value: state.dseeEnabled)
+        applyToggle(pauseOffMenuItem, title: "Pause When Taken Off", value: state.pauseWhenTakenOff)
+        applyToggle(voiceGuideMenuItem, title: "Voice Guidance", value: state.voiceGuideEnabled)
+        deviceAutoOffItem.isEnabled = state.deviceAutoOff != nil
+        deviceAutoOffItem.title = "Headphone Auto Off: \(state.deviceAutoOff?.title ?? "…")"
+        for (index, item) in deviceAutoOffMenu.items.enumerated() {
+            item.state = HeadphonesController.DeviceAutoOff.selectable[index] == state.deviceAutoOff ? .on : .off
+        }
+        codecMenuItem.title = "Codec: \(state.codecName ?? "…")"
+    }
+
+    private func applyToggle(_ item: NSMenuItem, title: String, value: Bool?) {
+        switch value {
+        case .some(true):
+            item.title = "\(title): ON"
+            item.state = .on
+            item.isEnabled = true
+        case .some(false):
+            item.title = "\(title): OFF"
+            item.state = .off
+            item.isEnabled = true
+        case .none:
+            item.title = "\(title): …"
+            item.state = .off
+            item.isEnabled = false
+        }
     }
 
     // MARK: - Menu actions
@@ -422,6 +511,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         switch sender.tag {
         case 0: mode = .noiseCancelling
         case 1: mode = .ambient
+        case 3: mode = .wind
         default: mode = .off
         }
         controller.setNCMode(mode)
@@ -429,6 +519,26 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     @objc private func toggleSpeakToChat() {
         controller.toggleSpeakToChat()
+    }
+
+    @objc private func setStcSensitivity(_ sender: NSMenuItem) {
+        guard let value = HeadphonesController.StcSensitivity(rawValue: UInt8(sender.tag)) else { return }
+        controller.setStcSensitivity(value)
+    }
+
+    @objc private func setStcTimeout(_ sender: NSMenuItem) {
+        guard let value = HeadphonesController.StcTimeout(rawValue: UInt8(sender.tag)) else { return }
+        controller.setStcTimeout(value)
+    }
+
+    @objc private func toggleDsee() { controller.toggleDsee() }
+    @objc private func togglePauseWhenTakenOff() { controller.togglePauseWhenTakenOff() }
+    @objc private func toggleVoiceGuide() { controller.toggleVoiceGuide() }
+
+    @objc private func setDeviceAutoOff(_ sender: NSMenuItem) {
+        let options = HeadphonesController.DeviceAutoOff.selectable
+        guard sender.tag >= 0, sender.tag < options.count else { return }
+        controller.setDeviceAutoOff(options[sender.tag])
     }
 
     private func updateEqSubmenu(presets: [HeadphonesController.EqPreset], current: UInt8?) {

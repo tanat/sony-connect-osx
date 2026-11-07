@@ -2,7 +2,60 @@ import Foundation
 
 final class HeadphonesController {
     enum NCMode: String {
-        case noiseCancelling, ambient, off
+        case noiseCancelling, wind, ambient, off
+    }
+
+    enum StcSensitivity: UInt8, CaseIterable {
+        case auto = 0x00, high = 0x01, low = 0x02
+        var title: String {
+            switch self {
+            case .auto: return "Auto"
+            case .high: return "High"
+            case .low: return "Low"
+            }
+        }
+    }
+
+    enum StcTimeout: UInt8, CaseIterable {
+        case short = 0x00, standard = 0x01, long = 0x02, never = 0x03
+        var title: String {
+            switch self {
+            case .short: return "15 seconds"
+            case .standard: return "30 seconds"
+            case .long: return "1 minute"
+            case .never: return "Don't end"
+            }
+        }
+    }
+
+    enum DeviceAutoOff: Equatable {
+        case off, min5, min30, hour1, hour3, takenOff, other(UInt8, UInt8)
+        var code: (UInt8, UInt8) {
+            switch self {
+            case .off: return (0x11, 0x00)
+            case .min5: return (0x00, 0x00)
+            case .min30: return (0x01, 0x01)
+            case .hour1: return (0x02, 0x02)
+            case .hour3: return (0x03, 0x03)
+            case .takenOff: return (0x10, 0x00)
+            case .other(let a, let b): return (a, b)
+            }
+        }
+        var title: String {
+            switch self {
+            case .off: return "Off"
+            case .min5: return "5 min"
+            case .min30: return "30 min"
+            case .hour1: return "1 hour"
+            case .hour3: return "3 hours"
+            case .takenOff: return "When taken off"
+            case .other(let a, let b): return String(format: "Other %02X %02X", a, b)
+            }
+        }
+        static let selectable: [DeviceAutoOff] = [.off, .min5, .min30, .hour1, .hour3, .takenOff]
+        static func from(b1: UInt8, b2: UInt8) -> DeviceAutoOff {
+            selectable.first { $0.code == (b1, b2) } ?? .other(b1, b2)
+        }
     }
 
     struct EqPreset {
@@ -25,6 +78,14 @@ final class HeadphonesController {
         var statusDescription: String = "Disconnected"
         var ambientLevel: Int = 20          // 0...20, meaningful only while ncMode == .ambient
         var ambientFocusOnVoice: Bool = false
+        var dseeEnabled: Bool? = nil
+        var pauseWhenTakenOff: Bool? = nil
+        var voiceGuideEnabled: Bool? = nil
+        var codecName: String? = nil
+        var stcSensitivity: StcSensitivity? = nil
+        var stcTimeout: StcTimeout? = nil
+        var stcFocusOnVoice: Bool = false
+        var deviceAutoOff: DeviceAutoOff? = nil
     }
 
     private(set) var state = State() {
@@ -89,6 +150,24 @@ final class HeadphonesController {
         static let systemNotify: UInt8 = 0xF9
         static let smartTalkingMode: UInt8 = 0x05            // SystemInquiredType.SMART_TALKING_MODE
         static let smartTalkingParamModeOnOff: UInt8 = 0x01
+        static let pauseWhenTakenOff: UInt8 = 0x03
+        static let deviceAutoOff: UInt8 = 0x04
+        static let dseeGet: UInt8 = 0xE6
+        static let dseeRet: UInt8 = 0xE7
+        static let dseeSet: UInt8 = 0xE8
+        static let dseeNotify: UInt8 = 0xE9
+        static let dseeType: UInt8 = 0x02
+        static let stcConfigGet: UInt8 = 0xFA
+        static let stcConfigRet: UInt8 = 0xFB
+        static let stcConfigSet: UInt8 = 0xFC
+        static let stcConfigNotify: UInt8 = 0xFD
+        static let codecGet: UInt8 = 0x18
+        static let codecRet: UInt8 = 0x19
+        static let codecNotify: UInt8 = 0x1B
+        static let voiceGet: UInt8 = 0x46
+        static let voiceRet: UInt8 = 0x47
+        static let voiceSet: UInt8 = 0x48
+        static let voiceNotify: UInt8 = 0x49
     }
 
     private var touchPanelSlot: UInt8?
@@ -276,7 +355,12 @@ final class HeadphonesController {
     private func sendNcasmSet(mode: NCMode) {
         // Payload: 68 02 effect ncType ncValue asmType asmId asmLevel
         let effect: UInt8 = (mode == .off) ? 0x00 : 0x11   // OFF or ADJUSTMENT_COMPLETION
-        let ncValue: UInt8 = (mode == .noiseCancelling) ? 0x02 : 0x00 // DUAL or OFF
+        let ncValue: UInt8
+        switch mode {
+        case .noiseCancelling: ncValue = 0x02 // DUAL
+        case .wind: ncValue = 0x01            // wind reduction, same setting type
+        default: ncValue = 0x00
+        }
         let asmLevel: UInt8 = (mode == .ambient) ? currentAmbientLevel : 0
         let payload: [UInt8] = [
             Opcode.ncasmSet,
@@ -302,6 +386,54 @@ final class HeadphonesController {
                      Opcode.smartTalkingParamModeOnOff,
                      enabled ? 0x01 : 0x00],
                     label: "SpeakToChat SET=\(enabled ? "ON" : "OFF")")
+    }
+
+    func setStcSensitivity(_ value: StcSensitivity) {
+        state.stcSensitivity = value
+        sendStcConfig()
+    }
+
+    func setStcTimeout(_ value: StcTimeout) {
+        state.stcTimeout = value
+        sendStcConfig()
+    }
+
+    private func sendStcConfig() {
+        guard let sens = state.stcSensitivity, let timeout = state.stcTimeout else { return }
+        sendPayload([Opcode.stcConfigSet, Opcode.smartTalkingMode, 0x00,
+                     sens.rawValue,
+                     state.stcFocusOnVoice ? 0x01 : 0x00,
+                     timeout.rawValue],
+                    label: "SpeakToChat CONFIG")
+    }
+
+    func toggleDsee() {
+        let next = !(state.dseeEnabled ?? false)
+        state.dseeEnabled = next
+        sendPayload([Opcode.dseeSet, Opcode.dseeType, 0x00, next ? 0x01 : 0x00],
+                    label: "DSEE SET=\(next)")
+    }
+
+    func togglePauseWhenTakenOff() {
+        let next = !(state.pauseWhenTakenOff ?? false)
+        state.pauseWhenTakenOff = next
+        sendPayload([Opcode.systemSet, Opcode.pauseWhenTakenOff, 0x00, next ? 0x01 : 0x00],
+                    label: "PAUSE_WHEN_OFF SET=\(next)")
+    }
+
+    func setDeviceAutoOff(_ option: DeviceAutoOff) {
+        state.deviceAutoOff = option
+        let code = option.code
+        sendPayload([Opcode.systemSet, Opcode.deviceAutoOff, 0x01, code.0, code.1],
+                    label: "DEVICE_AUTO_OFF SET=\(option.title)")
+    }
+
+    func toggleVoiceGuide() {
+        let next = !(state.voiceGuideEnabled ?? false)
+        state.voiceGuideEnabled = next
+        sendPayload([Opcode.voiceSet, 0x01, 0x01, next ? 0x01 : 0x00],
+                    label: "VOICE_GUIDE SET=\(next)",
+                    dataType: .command2)
     }
 
     private func sendPowerOff() {
@@ -371,6 +503,24 @@ final class HeadphonesController {
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.3) { [weak self] in
             self?.sendEqGet()
         }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+            self?.sendPayload([Opcode.stcConfigGet, Opcode.smartTalkingMode], label: "SpeakToChat CONFIG GET")
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.7) { [weak self] in
+            self?.sendPayload([Opcode.dseeGet, Opcode.dseeType], label: "DSEE GET")
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.9) { [weak self] in
+            self?.sendPayload([Opcode.systemGet, Opcode.pauseWhenTakenOff], label: "PAUSE_WHEN_OFF GET")
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.1) { [weak self] in
+            self?.sendPayload([Opcode.systemGet, Opcode.deviceAutoOff], label: "DEVICE_AUTO_OFF GET")
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.3) { [weak self] in
+            self?.sendPayload([Opcode.codecGet, 0x00], label: "CODEC GET")
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) { [weak self] in
+            self?.sendPayload([Opcode.voiceGet, 0x01, 0x01], label: "VOICE_GUIDE GET", dataType: .command2)
+        }
         autoOff.arm(deviceName: deviceName)
     }
 
@@ -388,20 +538,30 @@ final class HeadphonesController {
         sendPayload([Opcode.eqGetParam, Opcode.eqPresetInquiredType], label: "EQ GET")
     }
 
-    private func sendPayload(_ payload: [UInt8], label: String) {
+    private func sendPayload(_ payload: [UInt8], label: String, dataType: SonyDataType = .command1) {
         // Suppress sends if the BT layer has dropped — avoids a flood of
         // "NO CHANNEL" lines after a mid-init disconnect.
         guard case .connected = bluetooth.status else {
             FileLogger.shared.log("cmd", "skip \(label): not connected")
             return
         }
-        let packet = SonyPacket(dataType: .command1,
+        let packet = SonyPacket(dataType: dataType,
                                 sequence: outgoingSequence,
                                 payload: payload)
         outgoingSequence ^= 1
         let hex = payload.map { String(format: "%02X", $0) }.joined(separator: " ")
         FileLogger.shared.log("cmd", "\(label) payload=[\(hex)]")
         bluetooth.send(SonyFraming.encode(packet))
+    }
+
+    private func clearExtraFeatures() {
+        state.dseeEnabled = nil
+        state.pauseWhenTakenOff = nil
+        state.voiceGuideEnabled = nil
+        state.codecName = nil
+        state.stcSensitivity = nil
+        state.stcTimeout = nil
+        state.deviceAutoOff = nil
     }
 
     private func handleStatus(_ status: BluetoothClient.Status) {
@@ -419,6 +579,7 @@ final class HeadphonesController {
             state.eqPresets = []
             state.eqCurrentPresetId = nil
             state.eqBands = []
+            clearExtraFeatures()
             // Device may still be present (we just closed SPP for battery
             // saving) — reflect that instead of a flat "Disconnected".
             state.statusDescription = state.deviceReachable ? "\(deviceName) (idle)" : "Disconnected"
@@ -453,6 +614,7 @@ final class HeadphonesController {
             state.eqPresets = []
             state.eqCurrentPresetId = nil
             state.eqBands = []
+            clearExtraFeatures()
             state.statusDescription = state.deviceReachable ? "\(deviceName) (idle)" : "Disconnected"
         }
     }
@@ -473,6 +635,11 @@ final class HeadphonesController {
     }
 
     private func interpret(_ packet: SonyPacket) {
+        if packet.dataType == .command2 {
+            if awaitingInitResponse { completeInit() }
+            parseVoice(packet.payload)
+            return
+        }
         guard packet.dataType == .command1, let opcode = packet.payload.first else {
             return
         }
@@ -494,6 +661,12 @@ final class HeadphonesController {
             parseNcasm(packet.payload)
         case Opcode.systemRet, Opcode.systemNotify:
             parseSystem(packet.payload)
+        case Opcode.dseeRet, Opcode.dseeNotify:
+            parseDsee(packet.payload)
+        case Opcode.stcConfigRet, Opcode.stcConfigNotify:
+            parseStcConfig(packet.payload)
+        case Opcode.codecRet, Opcode.codecNotify:
+            parseCodec(packet.payload)
         case Opcode.touchSensorRet:
             if packet.payload.count >= 4 {
                 let slot = packet.payload[1]
@@ -572,6 +745,8 @@ final class HeadphonesController {
         let mode: NCMode
         if effect == 0x00 {
             mode = .off
+        } else if ncValue == 0x01 {
+            mode = .wind
         } else if ncValue != 0x00 {
             mode = .noiseCancelling
         } else if asmLevel > 0 {
@@ -679,13 +854,60 @@ final class HeadphonesController {
         //   RET (0xF7): [SmartTalkingModeSettingType=0x00 ON_OFF] [value]
         //   NTFY (0xF9): [SmartTalkingModeParameterType=0x01 MODE_ON_OFF] [value]
         // We accept both — middle byte logged for diagnostics, value at [3].
-        guard payload.count >= 4,
-              payload[1] == Opcode.smartTalkingMode else { return }
-        let middle = payload[2]
-        let raw = payload[3]
-        let enabled = raw != 0
-        state.speakToChatEnabled = enabled
+        guard payload.count >= 4 else { return }
+        switch payload[1] {
+        case Opcode.smartTalkingMode:
+            guard payload[2] == Opcode.smartTalkingParamModeOnOff else { return }
+            let enabled = payload[3] != 0
+            state.speakToChatEnabled = enabled
+            FileLogger.shared.log("state", "SpeakToChat = \(enabled ? "ON" : "OFF")")
+        case Opcode.pauseWhenTakenOff:
+            state.pauseWhenTakenOff = payload[3] != 0
+            FileLogger.shared.log("state", "PauseWhenTakenOff = \(state.pauseWhenTakenOff == true)")
+        case Opcode.deviceAutoOff:
+            guard payload.count >= 5 else { return }
+            state.deviceAutoOff = DeviceAutoOff.from(b1: payload[3], b2: payload[4])
+            FileLogger.shared.log("state", "DeviceAutoOff = \(state.deviceAutoOff?.title ?? "?")")
+        default:
+            break
+        }
+    }
+
+    private func parseDsee(_ payload: [UInt8]) {
+        guard payload.count >= 4, payload[1] == Opcode.dseeType else { return }
+        state.dseeEnabled = payload[3] != 0
+        FileLogger.shared.log("state", "DSEE = \(state.dseeEnabled == true)")
+    }
+
+    private func parseStcConfig(_ payload: [UInt8]) {
+        guard payload.count >= 6, payload[1] == Opcode.smartTalkingMode else { return }
+        state.stcSensitivity = StcSensitivity(rawValue: payload[3])
+        state.stcFocusOnVoice = payload[4] != 0
+        state.stcTimeout = StcTimeout(rawValue: payload[5])
         FileLogger.shared.log("state",
-            "SpeakToChat = \(enabled ? "ON" : "OFF") (mid=\(String(format: "0x%02X", middle)))")
+            "SpeakToChat config sens=\(state.stcSensitivity?.title ?? "?") timeout=\(state.stcTimeout?.title ?? "?")")
+    }
+
+    private func parseCodec(_ payload: [UInt8]) {
+        guard payload.count >= 3, payload[1] == 0x00 else { return }
+        let name: String
+        switch payload[2] {
+        case 0x01: name = "SBC"
+        case 0x02: name = "AAC"
+        case 0x10: name = "LDAC"
+        case 0x20: name = "aptX"
+        case 0x21: name = "aptX HD"
+        default: name = String(format: "0x%02X", payload[2])
+        }
+        state.codecName = name
+        FileLogger.shared.log("state", "Codec = \(name)")
+    }
+
+    private func parseVoice(_ payload: [UInt8]) {
+        guard payload.count >= 4,
+              payload[0] == Opcode.voiceRet || payload[0] == Opcode.voiceNotify,
+              payload[3] <= 1 else { return }
+        state.voiceGuideEnabled = payload[3] == 0x01
+        FileLogger.shared.log("state", "VoiceGuide = \(state.voiceGuideEnabled == true)")
     }
 }

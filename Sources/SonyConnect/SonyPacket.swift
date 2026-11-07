@@ -14,6 +14,7 @@ enum SonyDataType: UInt8 {
     case ack = 0x01
     case command1 = 0x0C
     case command1Response = 0x0D
+    case command2 = 0x0E
 }
 
 struct SonyPacket {
